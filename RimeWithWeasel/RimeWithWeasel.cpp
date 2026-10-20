@@ -45,7 +45,7 @@ std::wstring ClipboardHistoryPath() {
 
 std::wstring SanitizeClipboardText(const std::wstring& text) {
   std::wstring result;
-  result.reserve(std::min(text.size(), kClipboardDisplayLength + 1));
+  result.reserve((std::min)(text.size(), kClipboardDisplayLength + 1));
 
   for (wchar_t c : text) {
     if (result.size() >= kClipboardDisplayLength) {
