@@ -848,6 +848,13 @@ void RimeWithWeaselHandler::_ShowClipboardPanel(WeaselSessionId ipc_id) {
   m_clipboard_page = 0;
   m_clipboard_favorites_only = false;
   m_active_session = ipc_id;
+
+  if (!m_disabled) {
+    RimeSessionId session_id = to_session_id(ipc_id);
+    if (session_id)
+      rime_api->clear_composition(session_id);
+  }
+
   _RefreshClipboardPanel(ipc_id);
   m_ui->Show();
 }
