@@ -68,11 +68,10 @@ bool ContainsCaseInsensitive(const std::wstring& haystack,
   if (needle.empty())
     return true;
 
-  auto it = std::search(
-      haystack.begin(), haystack.end(), needle.begin(), needle.end(),
-      [](wchar_t a, wchar_t b) {
-        return std::towlower(a) == std::towlower(b);
-      });
+  auto it = std::search(haystack.begin(), haystack.end(), needle.begin(),
+                        needle.end(), [](wchar_t a, wchar_t b) {
+                          return std::towlower(a) == std::towlower(b);
+                        });
   return it != haystack.end();
 }
 
@@ -656,8 +655,9 @@ void RimeWithWeaselHandler::_SetupClipboardMonitor() {
   wc.lpszClassName = kClipboardWindowClass;
   RegisterClassEx(&wc);
 
-  m_clipboard_hwnd = CreateWindowEx(0, kClipboardWindowClass, L"", 0, 0, 0, 0, 0,
-                                    HWND_MESSAGE, nullptr, wc.hInstance, this);
+  m_clipboard_hwnd =
+      CreateWindowEx(0, kClipboardWindowClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                     nullptr, wc.hInstance, this);
 
   if (m_clipboard_hwnd) {
     AddClipboardFormatListener(m_clipboard_hwnd);
@@ -677,17 +677,16 @@ void RimeWithWeaselHandler::_TeardownClipboardMonitor() {
 }
 
 LRESULT CALLBACK RimeWithWeaselHandler::ClipboardWndProc(HWND hwnd,
-                                                          UINT msg,
-                                                          WPARAM wParam,
-                                                          LPARAM lParam) {
+                                                         UINT msg,
+                                                         WPARAM wParam,
+                                                         LPARAM lParam) {
   auto* self = reinterpret_cast<RimeWithWeaselHandler*>(
       GetWindowLongPtr(hwnd, GWLP_USERDATA));
 
   if (msg == WM_NCCREATE) {
     auto* create = reinterpret_cast<CREATESTRUCT*>(lParam);
     self = reinterpret_cast<RimeWithWeaselHandler*>(create->lpCreateParams);
-    SetWindowLongPtr(hwnd, GWLP_USERDATA,
-                     reinterpret_cast<LONG_PTR>(self));
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
   } else if (msg == WM_CLIPBOARDUPDATE && self) {
     self->_CaptureClipboardText();
   }
@@ -708,16 +707,13 @@ void RimeWithWeaselHandler::_LoadClipboardHistory() {
     count = (std::min)(count, static_cast<uint32_t>(kClipboardHistoryLimit));
     for (uint32_t i = 0; i < count; ++i) {
       uint32_t length = 0;
-      if (fread(&length, sizeof(length), 1, file) != 1 ||
-          length > (1u << 20))
-      {
+      if (fread(&length, sizeof(length), 1, file) != 1 || length > (1u << 20)) {
         break;
       }
 
       std::wstring text(length, L'\0');
       if (length > 0 &&
-          fread(text.data(), sizeof(wchar_t), length, file) != length)
-      {
+          fread(text.data(), sizeof(wchar_t), length, file) != length) {
         break;
       }
 
@@ -755,8 +751,8 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
 
   {
     std::lock_guard<std::mutex> lock(m_clipboard_mutex);
-    auto it = std::find(m_clipboard_entries.begin(), m_clipboard_entries.end(),
-                        text);
+    auto it =
+        std::find(m_clipboard_entries.begin(), m_clipboard_entries.end(), text);
     if (it != m_clipboard_entries.end())
       m_clipboard_entries.erase(it);
 
@@ -775,8 +771,7 @@ bool RimeWithWeaselHandler::_IsClipboardHotkey(
 
   if (!(keyEvent.mask & ibus::Modifier::CONTROL_MASK) ||
       !(keyEvent.mask & ibus::Modifier::SHIFT_MASK) ||
-      (keyEvent.mask & ibus::Modifier::ALT_MASK))
-  {
+      (keyEvent.mask & ibus::Modifier::ALT_MASK)) {
     return false;
   }
 
@@ -806,8 +801,7 @@ void RimeWithWeaselHandler::_HideClipboardPanel() {
     m_ui->Hide();
 }
 
-void RimeWithWeaselHandler::_RefreshClipboardPanel(
-    WeaselSessionId ipc_id) {
+void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
   if (!m_ui)
     return;
 
@@ -830,10 +824,9 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(
   if (m_clipboard_visible.empty()) {
     m_clipboard_highlight = 0;
   } else if (m_clipboard_highlight < 0 ||
-             m_clipboard_highlight >= static_cast<int>(m_clipboard_visible.size()))
-  {
-    m_clipboard_highlight =
-        static_cast<int>(m_clipboard_visible.size()) - 1;
+             m_clipboard_highlight >=
+                 static_cast<int>(m_clipboard_visible.size())) {
+    m_clipboard_highlight = static_cast<int>(m_clipboard_visible.size()) - 1;
   }
 
   Context ctx;
@@ -879,19 +872,17 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
 
     case ibus::Up:
       if (!m_clipboard_visible.empty()) {
-        m_clipboard_highlight =
-            (m_clipboard_highlight - 1 +
-             static_cast<int>(m_clipboard_visible.size())) %
-            static_cast<int>(m_clipboard_visible.size());
+        m_clipboard_highlight = (m_clipboard_highlight - 1 +
+                                 static_cast<int>(m_clipboard_visible.size())) %
+                                static_cast<int>(m_clipboard_visible.size());
       }
       _RefreshClipboardPanel(ipc_id);
       return true;
 
     case ibus::Down:
       if (!m_clipboard_visible.empty()) {
-        m_clipboard_highlight =
-            (m_clipboard_highlight + 1) %
-            static_cast<int>(m_clipboard_visible.size());
+        m_clipboard_highlight = (m_clipboard_highlight + 1) %
+                                static_cast<int>(m_clipboard_visible.size());
       }
       _RefreshClipboardPanel(ipc_id);
       return true;
@@ -933,14 +924,12 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
     }
   }
 
-  if (!(keyEvent.mask & (ibus::Modifier::CONTROL_MASK |
-                         ibus::Modifier::ALT_MASK)) &&
-      keyEvent.keycode >= 0x20 && keyEvent.keycode < 0x7f)
-  {
+  if (!(keyEvent.mask &
+        (ibus::Modifier::CONTROL_MASK | ibus::Modifier::ALT_MASK)) &&
+      keyEvent.keycode >= 0x20 && keyEvent.keycode < 0x7f) {
     wchar_t c = static_cast<wchar_t>(keyEvent.keycode);
     if (std::iswprint(static_cast<wint_t>(c))) {
-      m_clipboard_query.push_back(
-          static_cast<wchar_t>(std::towlower(c)));
+      m_clipboard_query.push_back(static_cast<wchar_t>(std::towlower(c)));
       _RefreshClipboardPanel(ipc_id);
     }
   }
@@ -950,9 +939,7 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
 
 void RimeWithWeaselHandler::_PasteClipboardEntry(WeaselSessionId ipc_id,
                                                  int index) {
-  if (index < 0 ||
-      index >= static_cast<int>(m_clipboard_visible.size()))
-  {
+  if (index < 0 || index >= static_cast<int>(m_clipboard_visible.size())) {
     return;
   }
 
