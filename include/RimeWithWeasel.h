@@ -115,6 +115,9 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool _IsClipboardHotkeyKey(int keycode) const;
   void _PasteClipboardEntry(WeaselSessionId ipc_id, int index);
   bool _SetClipboardEntry(const std::wstring& entry);
+  bool _CaptureClipboardImage(std::wstring* path, int* width, int* height);
+  bool _SetClipboardImage(const std::wstring& path);
+  void _CleanupClipboardImages();
   void _SendPasteKey();
   static LRESULT CALLBACK ClipboardWndProc(HWND hwnd,
                                            UINT msg,
@@ -177,6 +180,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool m_clipboard_favorites_only = false;
   bool m_clipboard_clear_confirm = false;
   bool m_clipboard_clear_key_down = false;
+  ULONG_PTR m_gdiplus_token = 0;
   HWND m_clipboard_hwnd = nullptr;
   std::mutex m_clipboard_mutex;
 };

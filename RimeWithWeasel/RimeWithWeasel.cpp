@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -17,8 +18,11 @@
 #include <map>
 #include <regex>
 #include <set>
+#include <system_error>
 #include <utility>
 #include <vector>
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 #include <rime_api.h>
 
 #define TRANSPARENT_COLOR 0x00000000
@@ -46,11 +50,16 @@ constexpr uint32_t kClipboardMaxStoredEntry = 4u << 20;
 constexpr size_t kClipboardMaxTotalChars = 32u << 20;
 constexpr size_t kClipboardMaxFiles = 100;
 constexpr size_t kClipboardMaxFileListChars = 32 * 1024;
+constexpr size_t kClipboardMaxImages = 10;
+constexpr size_t kClipboardMaxImageDimension = 4096;
+constexpr size_t kClipboardMaxImageSourceBytes = 64 * 1024 * 1024;
+constexpr size_t kClipboardMaxImageFileBytes = 24 * 1024 * 1024;
 const wchar_t kClipboardWindowClass[] = L"WeaselClipboardMonitor";
 // File entries are stored in the same string history as text. The control
 // characters cannot appear in Windows paths, so they keep the encoding
 // unambiguous without changing the on-disk format.
 const wchar_t kFileEntryPrefix[] = L"\x01FILES\x01";
+const wchar_t kImageEntryPrefix[] = L"\x01IMAGE\x01";
 const wchar_t kFileEntrySeparator = L'\x1F';
 
 // Same layout as DROPFILES from shellapi.h. Defining it locally keeps the
@@ -118,7 +127,105 @@ std::vector<std::wstring> DecodeFileEntry(const std::wstring& entry) {
   return files;
 }
 
+struct ImageEntry {
+  std::wstring path;
+  int width = 0;
+  int height = 0;
+};
+
+bool IsImageEntry(const std::wstring& entry) {
+  return entry.rfind(kImageEntryPrefix, 0) == 0;
+}
+
+std::wstring EncodeImageEntry(const ImageEntry& image) {
+  return std::wstring(kImageEntryPrefix) + image.path + kFileEntrySeparator +
+         std::to_wstring(image.width) + kFileEntrySeparator +
+         std::to_wstring(image.height);
+}
+
+bool DecodeImageEntry(const std::wstring& entry, ImageEntry* image) {
+  if (!image || !IsImageEntry(entry))
+    return false;
+
+  std::vector<std::wstring> parts;
+  size_t start = std::wcslen(kImageEntryPrefix);
+  while (start <= entry.size()) {
+    size_t end = entry.find(kFileEntrySeparator, start);
+    if (end == std::wstring::npos)
+      end = entry.size();
+    parts.emplace_back(entry, start, end - start);
+    if (end == entry.size())
+      break;
+    start = end + 1;
+  }
+
+  if (parts.size() != 3 || parts[0].empty())
+    return false;
+
+  try {
+    image->path = parts[0];
+    image->width = std::stoi(parts[1]);
+    image->height = std::stoi(parts[2]);
+  } catch (...) {
+    return false;
+  }
+  return image->width > 0 && image->height > 0;
+}
+
+std::wstring ClipboardImageDirectory() {
+  return (WeaselUserDataPath() / L"weasel-clipboard-images").wstring();
+}
+
+bool EnsureClipboardImageDirectory() {
+  const std::wstring directory = ClipboardImageDirectory();
+  if (directory.empty())
+    return false;
+  if (CreateDirectoryW(directory.c_str(), nullptr))
+    return true;
+  return GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+std::wstring MakeClipboardImagePath() {
+  static std::atomic<unsigned long long> counter{0};
+  const unsigned long long id = GetTickCount64();
+  const std::wstring filename =
+      std::to_wstring(id) + L"-" + std::to_wstring(++counter) + L".png";
+  return (std::filesystem::path(ClipboardImageDirectory()) / filename)
+      .wstring();
+}
+
+bool GetPngEncoderClsid(CLSID* clsid) {
+  UINT count = 0;
+  UINT size = 0;
+  if (Gdiplus::GetImageEncodersSize(&count, &size) != Gdiplus::Ok ||
+      size == 0) {
+    return false;
+  }
+
+  std::vector<BYTE> buffer(size);
+  auto* codecs = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buffer.data());
+  if (Gdiplus::GetImageEncoders(count, size, codecs) != Gdiplus::Ok)
+    return false;
+
+  for (UINT i = 0; i < count; ++i) {
+    if (codecs[i].MimeType &&
+        std::wcscmp(codecs[i].MimeType, L"image/png") == 0) {
+      *clsid = codecs[i].Clsid;
+      return true;
+    }
+  }
+  return false;
+}
+
 std::wstring ClipboardEntryDisplay(const std::wstring& entry) {
+  if (IsImageEntry(entry)) {
+    ImageEntry image;
+    if (!DecodeImageEntry(entry, &image))
+      return L"[图片]";
+    return L"[图片 " + std::to_wstring(image.width) + L"×" +
+           std::to_wstring(image.height) + L"]";
+  }
+
   if (!IsFileEntry(entry))
     return SanitizeClipboardText(entry);
 
@@ -483,6 +590,11 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
       m_show_notifications_time(1200),
       _UpdateUICallback(NULL) {
   LOG(INFO) << "constructing RimeWithWeaselHandler";
+  Gdiplus::GdiplusStartupInput gdiplus_input;
+  if (Gdiplus::GdiplusStartup(&m_gdiplus_token, &gdiplus_input, nullptr) !=
+      Gdiplus::Ok) {
+    m_gdiplus_token = 0;
+  }
   m_ui->InServer() = true;
   rime_api = rime_get_api();
   assert(rime_api);
@@ -504,6 +616,10 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
   m_show_notifications.clear();
   m_session_status_map.clear();
   m_app_options.clear();
+  if (m_gdiplus_token) {
+    Gdiplus::GdiplusShutdown(m_gdiplus_token);
+    m_gdiplus_token = 0;
+  }
 }
 
 bool add_session = false;
@@ -601,6 +717,7 @@ void RimeWithWeaselHandler::Initialize() {
 
   _LoadClipboardHistory();
   _LoadClipboardFavorites();
+  _CleanupClipboardImages();
   _SetupClipboardMonitor();
   m_last_schema_id.clear();
 }
@@ -609,6 +726,7 @@ void RimeWithWeaselHandler::Finalize() {
   _HideClipboardPanel();
   _SaveClipboardHistory();
   _SaveClipboardFavorites();
+  _CleanupClipboardImages();
   _TeardownClipboardMonitor();
   m_active_session = 0;
   m_disabled = true;
@@ -1139,8 +1257,27 @@ void RimeWithWeaselHandler::_LoadClipboardHistory() {
         break;
       }
 
-      if (!text.empty())
+      if (!text.empty()) {
+        if (IsImageEntry(text)) {
+          ImageEntry image;
+          if (!DecodeImageEntry(text, &image) ||
+              GetFileAttributesW(image.path.c_str()) ==
+                  INVALID_FILE_ATTRIBUTES) {
+            continue;
+          }
+        }
         m_clipboard_entries.push_back(std::move(text));
+      }
+    }
+
+    size_t image_count = 0;
+    for (auto it = m_clipboard_entries.begin();
+         it != m_clipboard_entries.end();) {
+      if (IsImageEntry(*it) && ++image_count > kClipboardMaxImages) {
+        it = m_clipboard_entries.erase(it);
+        continue;
+      }
+      ++it;
     }
   }
 
@@ -1194,6 +1331,39 @@ void RimeWithWeaselHandler::_SaveClipboardFavorites() {
     LOG(WARNING) << "failed to save clipboard favorites";
 }
 
+void RimeWithWeaselHandler::_CleanupClipboardImages() {
+  std::set<std::wstring> referenced;
+  {
+    std::lock_guard<std::mutex> lock(m_clipboard_mutex);
+    for (const auto& entry : m_clipboard_entries) {
+      ImageEntry image;
+      if (DecodeImageEntry(entry, &image))
+        referenced.insert(image.path);
+    }
+  }
+
+  const std::wstring directory = ClipboardImageDirectory();
+  if (directory.empty())
+    return;
+
+  std::error_code ec;
+  if (!std::filesystem::is_directory(directory, ec) || ec)
+    return;
+
+  for (const auto& item : std::filesystem::directory_iterator(directory, ec)) {
+    if (ec)
+      break;
+    if (!item.is_regular_file(ec)) {
+      if (ec)
+        break;
+      continue;
+    }
+    const std::wstring path = item.path().wstring();
+    if (referenced.find(path) == referenced.end())
+      DeleteFileW(path.c_str());
+  }
+}
+
 void RimeWithWeaselHandler::_CaptureClipboardText() {
   if (ClipboardContentExcluded(m_clipboard_hwnd))
     return;
@@ -1205,9 +1375,17 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
     if (entry.size() > kClipboardMaxFileListChars)
       return;
   } else {
-    entry = ReadClipboardText(m_clipboard_hwnd);
-    if (entry.empty() || entry.size() > m_clipboard_max_text_length)
-      return;
+    std::wstring text = ReadClipboardText(m_clipboard_hwnd);
+    if (!text.empty() && text.size() <= m_clipboard_max_text_length) {
+      entry = std::move(text);
+    } else {
+      std::wstring image_path;
+      int width = 0;
+      int height = 0;
+      if (!_CaptureClipboardImage(&image_path, &width, &height))
+        return;
+      entry = EncodeImageEntry(ImageEntry{image_path, width, height});
+    }
   }
 
   {
@@ -1221,6 +1399,21 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
     if (m_clipboard_entries.size() > m_clipboard_history_limit)
       m_clipboard_entries.resize(m_clipboard_history_limit);
 
+    if (IsImageEntry(entry)) {
+      size_t image_count = 0;
+      for (auto image_it = m_clipboard_entries.begin();
+           image_it != m_clipboard_entries.end();) {
+        if (IsImageEntry(*image_it)) {
+          if (++image_count > kClipboardMaxImages) {
+            m_clipboard_favorites.erase(*image_it);
+            image_it = m_clipboard_entries.erase(image_it);
+            continue;
+          }
+        }
+        ++image_it;
+      }
+    }
+
     size_t total_chars = 0;
     for (const auto& item : m_clipboard_entries)
       total_chars += item.size();
@@ -1232,6 +1425,7 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
   }
 
   _SaveClipboardHistory();
+  _CleanupClipboardImages();
   m_clipboard_dirty = true;
 }
 
@@ -1406,8 +1600,10 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel() {
       const bool favorite = visible_favorites[i];
       ctx.cinfo.labels.push_back(Text(std::to_wstring(i + 1)));
       ctx.cinfo.candies.push_back(Text(ClipboardEntryDisplay(text)));
-      ctx.cinfo.comments.push_back(
-          Text(favorite ? L"★ 收藏" : (IsFileEntry(text) ? L"文件" : L"历史")));
+      const wchar_t* kind = IsImageEntry(text)
+                                ? L"图片"
+                                : (IsFileEntry(text) ? L"文件" : L"历史");
+      ctx.cinfo.comments.push_back(Text(favorite ? L"★ 收藏" : kind));
     }
   }
 
@@ -1680,9 +1876,234 @@ void RimeWithWeaselHandler::_PasteClipboardEntry(WeaselSessionId ipc_id,
 }
 
 bool RimeWithWeaselHandler::_SetClipboardEntry(const std::wstring& entry) {
+  if (IsImageEntry(entry)) {
+    ImageEntry image;
+    return DecodeImageEntry(entry, &image) && _SetClipboardImage(image.path);
+  }
   if (IsFileEntry(entry))
     return WriteClipboardFiles(m_clipboard_hwnd, DecodeFileEntry(entry));
   return WriteClipboardText(m_clipboard_hwnd, entry);
+}
+
+bool RimeWithWeaselHandler::_SetClipboardImage(const std::wstring& path) {
+  if (!m_gdiplus_token || path.empty())
+    return false;
+
+  std::error_code ec;
+  const auto file_size = std::filesystem::file_size(path, ec);
+  if (ec || file_size > kClipboardMaxImageFileBytes)
+    return false;
+
+  Gdiplus::Bitmap* bitmap = Gdiplus::Bitmap::FromFile(path.c_str());
+  if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok) {
+    delete bitmap;
+    return false;
+  }
+
+  const UINT width = bitmap->GetWidth();
+  const UINT height = bitmap->GetHeight();
+  if (width == 0 || height == 0 ||
+      width > static_cast<UINT>(kClipboardMaxImageDimension) ||
+      height > static_cast<UINT>(kClipboardMaxImageDimension)) {
+    delete bitmap;
+    return false;
+  }
+
+  Gdiplus::Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
+  Gdiplus::BitmapData data = {};
+  if (bitmap->LockBits(&rect, Gdiplus::ImageLockModeRead,
+                       Gdiplus::PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
+    delete bitmap;
+    return false;
+  }
+
+  const size_t row_bytes = static_cast<size_t>(width) * 4;
+  const size_t image_size = row_bytes * height;
+  const size_t total = sizeof(BITMAPINFOHEADER) + image_size;
+  HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, total);
+  if (!memory) {
+    bitmap->UnlockBits(&data);
+    delete bitmap;
+    return false;
+  }
+
+  auto* header = static_cast<BITMAPINFOHEADER*>(GlobalLock(memory));
+  if (!header) {
+    GlobalFree(memory);
+    bitmap->UnlockBits(&data);
+    delete bitmap;
+    return false;
+  }
+
+  header->biSize = sizeof(BITMAPINFOHEADER);
+  header->biWidth = static_cast<LONG>(width);
+  header->biHeight = static_cast<LONG>(height);
+  header->biPlanes = 1;
+  header->biBitCount = 32;
+  header->biCompression = BI_RGB;
+  header->biSizeImage = static_cast<DWORD>(image_size);
+  header->biXPelsPerMeter = 0;
+  header->biYPelsPerMeter = 0;
+  header->biClrUsed = 0;
+  header->biClrImportant = 0;
+
+  auto* destination = reinterpret_cast<BYTE*>(header + 1);
+  const auto* source = static_cast<const BYTE*>(data.Scan0);
+  const std::ptrdiff_t stride = data.Stride;
+  for (UINT y = 0; y < height; ++y) {
+    const BYTE* source_row =
+        stride >= 0
+            ? source + static_cast<std::ptrdiff_t>(y) * stride
+            : source + static_cast<std::ptrdiff_t>(height - 1 - y) * -stride;
+    memcpy(destination + static_cast<size_t>(height - 1 - y) * row_bytes,
+           source_row, row_bytes);
+  }
+
+  GlobalUnlock(memory);
+  bitmap->UnlockBits(&data);
+  delete bitmap;
+
+  if (!OpenClipboard(m_clipboard_hwnd)) {
+    GlobalFree(memory);
+    return false;
+  }
+
+  bool ok = false;
+  EmptyClipboard();
+  if (SetClipboardData(CF_DIB, memory)) {
+    memory = nullptr;
+    ok = true;
+  }
+  if (memory)
+    GlobalFree(memory);
+  CloseClipboard();
+  return ok;
+}
+
+bool RimeWithWeaselHandler::_CaptureClipboardImage(std::wstring* path,
+                                                   int* width,
+                                                   int* height) {
+  if (!m_gdiplus_token || !path || !width || !height)
+    return false;
+  if (!EnsureClipboardImageDirectory())
+    return false;
+  if (!OpenClipboard(m_clipboard_hwnd))
+    return false;
+
+  Gdiplus::Bitmap* bitmap = nullptr;
+  HBITMAP owned_bitmap = nullptr;
+
+  HBITMAP clipboard_bitmap = static_cast<HBITMAP>(GetClipboardData(CF_BITMAP));
+  if (clipboard_bitmap) {
+    bitmap = Gdiplus::Bitmap::FromHBITMAP(clipboard_bitmap, nullptr);
+    if (bitmap && bitmap->GetLastStatus() != Gdiplus::Ok) {
+      delete bitmap;
+      bitmap = nullptr;
+    }
+  }
+
+  if (!bitmap) {
+    HANDLE dib = GetClipboardData(CF_DIB);
+    if (!dib)
+      dib = GetClipboardData(CF_DIBV5);
+    if (dib) {
+      const SIZE_T size = GlobalSize(dib);
+      auto* dib_data = static_cast<BYTE*>(GlobalLock(dib));
+      if (dib_data && size >= sizeof(BITMAPINFOHEADER) &&
+          size <= kClipboardMaxImageSourceBytes) {
+        auto* header = reinterpret_cast<BITMAPINFOHEADER*>(dib_data);
+        const LONG w = header->biWidth;
+        const LONG h = header->biHeight;
+        if (header->biSize >= sizeof(BITMAPINFOHEADER) && w > 0 && h != 0 &&
+            w <= static_cast<LONG>(kClipboardMaxImageDimension) &&
+            h >= -static_cast<LONG>(kClipboardMaxImageDimension) &&
+            h <= static_cast<LONG>(kClipboardMaxImageDimension) &&
+            header->biBitCount > 0 && header->biBitCount <= 32) {
+          const size_t height_px =
+              h < 0 ? static_cast<size_t>(-h) : static_cast<size_t>(h);
+          size_t palette_size = 0;
+          if (header->biBitCount <= 8) {
+            const size_t colors = header->biClrUsed
+                                      ? header->biClrUsed
+                                      : (size_t(1) << header->biBitCount);
+            palette_size = colors * sizeof(RGBQUAD);
+          }
+
+          size_t masks_size = 0;
+          if (header->biSize == sizeof(BITMAPINFOHEADER) &&
+              header->biCompression == BI_BITFIELDS) {
+            masks_size = 3 * sizeof(DWORD);
+          }
+
+          size_t image_size = header->biSizeImage;
+          if (image_size == 0) {
+            const size_t row_bytes =
+                ((static_cast<size_t>(w) * header->biBitCount + 31) / 32) * 4;
+            image_size = row_bytes * height_px;
+          }
+
+          const size_t offset = header->biSize + masks_size + palette_size;
+          if (image_size <= kClipboardMaxImageSourceBytes && offset <= size &&
+              image_size <= size - offset) {
+            HDC hdc = GetDC(nullptr);
+            if (hdc) {
+              HBITMAP hbmp = CreateDIBitmap(
+                  hdc, header, CBM_INIT, dib_data + offset,
+                  reinterpret_cast<BITMAPINFO*>(dib_data), DIB_RGB_COLORS);
+              if (hbmp) {
+                bitmap = Gdiplus::Bitmap::FromHBITMAP(hbmp, nullptr);
+                if (bitmap && bitmap->GetLastStatus() != Gdiplus::Ok) {
+                  delete bitmap;
+                  bitmap = nullptr;
+                }
+                if (bitmap)
+                  owned_bitmap = hbmp;
+                else
+                  DeleteObject(hbmp);
+              }
+              ReleaseDC(nullptr, hdc);
+            }
+          }
+        }
+      }
+      if (dib_data)
+        GlobalUnlock(dib);
+    }
+  }
+
+  bool ok = false;
+  if (bitmap) {
+    const UINT w = bitmap->GetWidth();
+    const UINT h = bitmap->GetHeight();
+    if (w > 0 && h > 0 && w <= static_cast<UINT>(kClipboardMaxImageDimension) &&
+        h <= static_cast<UINT>(kClipboardMaxImageDimension)) {
+      CLSID png_clsid = {};
+      if (GetPngEncoderClsid(&png_clsid)) {
+        const std::wstring file_path = MakeClipboardImagePath();
+        if (bitmap->Save(file_path.c_str(), &png_clsid, nullptr) ==
+            Gdiplus::Ok) {
+          std::error_code ec;
+          const auto file_size = std::filesystem::file_size(file_path, ec);
+          if (!ec && file_size <= kClipboardMaxImageFileBytes) {
+            *path = file_path;
+            *width = static_cast<int>(w);
+            *height = static_cast<int>(h);
+            ok = true;
+          } else {
+            DeleteFileW(file_path.c_str());
+          }
+        } else {
+          DeleteFileW(file_path.c_str());
+        }
+      }
+    }
+  }
+
+  delete bitmap;
+  if (owned_bitmap)
+    DeleteObject(owned_bitmap);
+  CloseClipboard();
+  return ok;
 }
 
 void RimeWithWeaselHandler::_SendPasteKey() {
