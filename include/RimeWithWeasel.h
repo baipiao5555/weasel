@@ -107,7 +107,8 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   void _ToggleClipboardFavorite();
   void _ShowClipboardPanel(WeaselSessionId ipc_id);
   void _HideClipboardPanel();
-  void _RefreshClipboardPanel(WeaselSessionId ipc_id);
+  void _RefreshClipboardPanel();
+  void _ChangeClipboardPage(bool backward);
   bool _HandleClipboardKey(const weasel::KeyEvent& keyEvent,
                            WeaselSessionId ipc_id);
   bool _IsClipboardHotkey(const weasel::KeyEvent& keyEvent) const;
@@ -173,6 +174,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   int m_clipboard_total_pages = 1;
   bool m_clipboard_favorites_only = false;
   bool m_clipboard_clear_confirm = false;
+  bool m_clipboard_clear_key_down = false;
   HWND m_clipboard_hwnd = nullptr;
   std::mutex m_clipboard_mutex;
 };
