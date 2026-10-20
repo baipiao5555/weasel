@@ -219,6 +219,121 @@ bool HashFile(const std::wstring& path, uint64_t* hash) {
   return ok;
 }
 
+bool ReadFileBytes(const std::wstring& path,
+                   std::vector<BYTE>* data,
+                   size_t max_bytes) {
+  if (!data)
+    return false;
+  data->clear();
+
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || !file)
+    return false;
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return false;
+  }
+  const long size = ftell(file);
+  if (size < 0 || static_cast<size_t>(size) > max_bytes) {
+    fclose(file);
+    return false;
+  }
+  if (fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return false;
+  }
+
+  data->resize(static_cast<size_t>(size));
+  const bool read_ok = data->empty() || fread(data->data(), 1, data->size(),
+                                              file) == data->size();
+  const bool no_error = !ferror(file);
+  fclose(file);
+  return read_ok && no_error;
+}
+
+bool WriteBufferToFile(const std::wstring& path,
+                       const BYTE* data,
+                       size_t size) {
+  if (!data || size == 0)
+    return false;
+
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || !file)
+    return false;
+
+  const bool write_ok = fwrite(data, 1, size, file) == size && !ferror(file);
+  const bool close_ok = fclose(file) == 0;
+  if (!write_ok || !close_ok) {
+    DeleteFileW(path.c_str());
+    return false;
+  }
+  return true;
+}
+
+bool GetPngDimensions(const BYTE* data, size_t size, int* width, int* height) {
+  if (!data || !width || !height || size < 24)
+    return false;
+
+  static const BYTE signature[8] = {0x89, 'P',  'N',  'G',
+                                    0x0D, 0x0A, 0x1A, 0x0A};
+  if (memcmp(data, signature, sizeof(signature)) != 0 ||
+      memcmp(data + 12, "IHDR", 4) != 0) {
+    return false;
+  }
+
+  const auto read_be32 = [](const BYTE* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+  };
+  const uint32_t w = read_be32(data + 16);
+  const uint32_t h = read_be32(data + 20);
+  if (w == 0 || h == 0 || w > kClipboardMaxImageDimension ||
+      h > kClipboardMaxImageDimension) {
+    return false;
+  }
+
+  *width = static_cast<int>(w);
+  *height = static_cast<int>(h);
+  return true;
+}
+
+bool FinalizeClipboardImageFile(const std::wstring& temp_path,
+                                std::wstring* final_path) {
+  if (!final_path)
+    return false;
+
+  uint64_t hash = 0;
+  if (!HashFile(temp_path, &hash)) {
+    DeleteFileW(temp_path.c_str());
+    return false;
+  }
+
+  wchar_t filename[32] = {};
+  std::swprintf(filename, 32, L"%016llX.png",
+                static_cast<unsigned long long>(hash));
+  const std::wstring path =
+      (std::filesystem::path(ClipboardImageDirectory()) / filename).wstring();
+
+  if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (!MoveFileExW(temp_path.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH))
+      DeleteFileW(temp_path.c_str());
+  } else {
+    DeleteFileW(temp_path.c_str());
+  }
+
+  std::error_code ec;
+  const auto file_size = std::filesystem::file_size(path, ec);
+  if (ec || file_size > kClipboardMaxImageFileBytes ||
+      GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    DeleteFileW(path.c_str());
+    return false;
+  }
+
+  *final_path = path;
+  return true;
+}
+
 bool GetPngEncoderClsid(CLSID* clsid) {
   UINT count = 0;
   UINT size = 0;
@@ -383,6 +498,16 @@ std::vector<std::wstring> ReadClipboardFiles(HWND owner) {
 
   CloseClipboard();
   return files;
+}
+
+bool IsClipboardImageAvailable() {
+  if (IsClipboardFormatAvailable(CF_BITMAP) ||
+      IsClipboardFormatAvailable(CF_DIB) ||
+      IsClipboardFormatAvailable(CF_DIBV5)) {
+    return true;
+  }
+  const UINT png_format = RegisterClipboardFormatW(L"PNG");
+  return png_format && IsClipboardFormatAvailable(png_format);
 }
 
 bool ClipboardContentExcluded(HWND owner) {
@@ -1390,11 +1515,15 @@ void RimeWithWeaselHandler::_CleanupClipboardImages() {
 }
 
 void RimeWithWeaselHandler::_CaptureClipboardText() {
-  if (GetTickCount64() <= m_clipboard_ignore_until.load() &&
-      (IsClipboardFormatAvailable(CF_BITMAP) ||
-       IsClipboardFormatAvailable(CF_DIB) ||
-       IsClipboardFormatAvailable(CF_DIBV5))) {
-    return;
+  const unsigned long long now = GetTickCount64();
+  if (now <= m_clipboard_ignore_until.load()) {
+    if (IsClipboardImageAvailable() &&
+        m_clipboard_ignore_next.exchange(false)) {
+      m_clipboard_ignore_until = 0;
+      return;
+    }
+  } else {
+    m_clipboard_ignore_next = false;
   }
   if (ClipboardContentExcluded(m_clipboard_hwnd))
     return;
@@ -1897,13 +2026,17 @@ void RimeWithWeaselHandler::_PasteClipboardEntry(WeaselSessionId ipc_id,
 
   std::wstring entry = m_clipboard_visible[index];
   const bool image_entry = IsImageEntry(entry);
-  if (image_entry)
+  if (image_entry) {
+    m_clipboard_ignore_next = true;
     m_clipboard_ignore_until = GetTickCount64() + 300;
+  }
   _HideClipboardPanel();
   Sleep(30);
   if (!_SetClipboardEntry(entry)) {
-    if (image_entry)
+    if (image_entry) {
+      m_clipboard_ignore_next = false;
       m_clipboard_ignore_until = 0;
+    }
     LOG(WARNING) << "failed to set clipboard entry";
     return;
   }
@@ -1999,6 +2132,9 @@ bool RimeWithWeaselHandler::_SetClipboardImage(const std::wstring& path) {
   bitmap->UnlockBits(&data);
   delete bitmap;
 
+  std::vector<BYTE> png_bytes;
+  ReadFileBytes(path, &png_bytes, kClipboardMaxImageFileBytes);
+
   if (!OpenClipboard(m_clipboard_hwnd)) {
     GlobalFree(memory);
     return false;
@@ -2010,6 +2146,27 @@ bool RimeWithWeaselHandler::_SetClipboardImage(const std::wstring& path) {
     memory = nullptr;
     ok = true;
   }
+
+  if (!png_bytes.empty()) {
+    const UINT png_format = RegisterClipboardFormatW(L"PNG");
+    if (png_format) {
+      HGLOBAL png_memory = GlobalAlloc(GMEM_MOVEABLE, png_bytes.size());
+      if (png_memory) {
+        void* buffer = GlobalLock(png_memory);
+        if (buffer) {
+          memcpy(buffer, png_bytes.data(), png_bytes.size());
+          GlobalUnlock(png_memory);
+          if (SetClipboardData(png_format, png_memory)) {
+            png_memory = nullptr;
+            ok = true;
+          }
+        }
+        if (png_memory)
+          GlobalFree(png_memory);
+      }
+    }
+  }
+
   if (memory)
     GlobalFree(memory);
   CloseClipboard();
@@ -2019,12 +2176,49 @@ bool RimeWithWeaselHandler::_SetClipboardImage(const std::wstring& path) {
 bool RimeWithWeaselHandler::_CaptureClipboardImage(std::wstring* path,
                                                    int* width,
                                                    int* height) {
-  if (!m_gdiplus_token || !path || !width || !height)
+  if (!path || !width || !height)
     return false;
   if (!EnsureClipboardImageDirectory())
     return false;
   if (!OpenClipboard(m_clipboard_hwnd))
     return false;
+
+  bool ok = false;
+  const UINT png_format = RegisterClipboardFormatW(L"PNG");
+  if (png_format) {
+    HANDLE png = GetClipboardData(png_format);
+    if (png) {
+      const SIZE_T png_size = GlobalSize(png);
+      if (png_size >= 24 && png_size <= kClipboardMaxImageFileBytes) {
+        const auto* png_data = static_cast<const BYTE*>(GlobalLock(png));
+        if (png_data) {
+          int png_width = 0;
+          int png_height = 0;
+          if (GetPngDimensions(png_data, png_size, &png_width, &png_height)) {
+            const std::wstring temp_path = MakeClipboardImagePath();
+            if (WriteBufferToFile(temp_path, png_data, png_size)) {
+              std::wstring final_path;
+              if (FinalizeClipboardImageFile(temp_path, &final_path)) {
+                *path = final_path;
+                *width = png_width;
+                *height = png_height;
+                ok = true;
+              }
+            }
+          }
+          GlobalUnlock(png);
+        }
+      }
+    }
+  }
+  if (ok) {
+    CloseClipboard();
+    return true;
+  }
+  if (!m_gdiplus_token) {
+    CloseClipboard();
+    return false;
+  }
 
   Gdiplus::Bitmap* bitmap = nullptr;
   HBITMAP owned_bitmap = nullptr;
@@ -2107,7 +2301,6 @@ bool RimeWithWeaselHandler::_CaptureClipboardImage(std::wstring* path,
     }
   }
 
-  bool ok = false;
   if (bitmap) {
     const UINT w = bitmap->GetWidth();
     const UINT h = bitmap->GetHeight();
@@ -2118,38 +2311,12 @@ bool RimeWithWeaselHandler::_CaptureClipboardImage(std::wstring* path,
         const std::wstring temp_path = MakeClipboardImagePath();
         if (bitmap->Save(temp_path.c_str(), &png_clsid, nullptr) ==
             Gdiplus::Ok) {
-          uint64_t hash = 0;
-          if (HashFile(temp_path, &hash)) {
-            wchar_t filename[32] = {};
-            std::swprintf(filename, 32, L"%016llX.png",
-                          static_cast<unsigned long long>(hash));
-            const std::wstring final_path =
-                (std::filesystem::path(ClipboardImageDirectory()) / filename)
-                    .wstring();
-            if (GetFileAttributesW(final_path.c_str()) ==
-                INVALID_FILE_ATTRIBUTES) {
-              if (!MoveFileExW(temp_path.c_str(), final_path.c_str(),
-                               MOVEFILE_WRITE_THROUGH)) {
-                DeleteFileW(temp_path.c_str());
-              }
-            } else {
-              DeleteFileW(temp_path.c_str());
-            }
-
-            std::error_code ec;
-            const auto file_size = std::filesystem::file_size(final_path, ec);
-            if (!ec && file_size <= kClipboardMaxImageFileBytes &&
-                GetFileAttributesW(final_path.c_str()) !=
-                    INVALID_FILE_ATTRIBUTES) {
-              *path = final_path;
-              *width = static_cast<int>(w);
-              *height = static_cast<int>(h);
-              ok = true;
-            } else {
-              DeleteFileW(final_path.c_str());
-            }
-          } else {
-            DeleteFileW(temp_path.c_str());
+          std::wstring final_path;
+          if (FinalizeClipboardImageFile(temp_path, &final_path)) {
+            *path = final_path;
+            *width = static_cast<int>(w);
+            *height = static_cast<int>(h);
+            ok = true;
           }
         } else {
           DeleteFileW(temp_path.c_str());
