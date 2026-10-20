@@ -466,8 +466,15 @@ bool RimeWithWeaselHandler::ChangePage(bool backward,
                                        EatLine eat) {
   DLOG(INFO) << "change page, ipc_id = " << ipc_id
              << (backward ? "backward" : "foreward");
-  if (m_clipboard_mode)
+  if (m_clipboard_mode) {
+    int page = m_clipboard_page + (backward ? -1 : 1);
+    if (page >= 0 && page < m_clipboard_total_pages) {
+      m_clipboard_page = page;
+      m_clipboard_highlight = 0;
+      _RefreshClipboardPanel(ipc_id);
+    }
     return true;
+  }
   bool res = rime_api->change_page(to_session_id(ipc_id), backward);
   _Respond(ipc_id, eat);
   _UpdateUI(ipc_id);
@@ -849,6 +856,14 @@ void RimeWithWeaselHandler::_ShowClipboardPanel(WeaselSessionId ipc_id) {
   m_clipboard_favorites_only = false;
   m_active_session = ipc_id;
 
+  bool history_empty = false;
+  {
+    std::lock_guard<std::mutex> lock(m_clipboard_mutex);
+    history_empty = m_clipboard_entries.empty();
+  }
+  if (history_empty)
+    _CaptureClipboardText();
+
   if (!m_disabled) {
     RimeSessionId session_id = to_session_id(ipc_id);
     if (session_id)
@@ -937,16 +952,15 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
   if (m_clipboard_favorites_only)
     title += L" [收藏]";
   if (m_clipboard_total_pages > 1) {
-    title += L"  " + std::to_wstring(m_clipboard_page + 1) + L"/" +
+    title += L" " + std::to_wstring(m_clipboard_page + 1) + L"/" +
              std::to_wstring(m_clipboard_total_pages);
   }
   if (!m_clipboard_query.empty())
-    title += L"  " + m_clipboard_query;
+    title += L"  搜索:" + m_clipboard_query;
 
   ctx.preedit = Text(title);
-  ctx.aux = Text(
-      L"↑↓ 选择  PgUp/PgDn 翻页  Enter 粘贴  Del 删除  Tab 收藏筛选  "
-      L"Ctrl+D 收藏  Esc 关闭");
+  ctx.aux =
+      Text(L"↑↓选择  PgUp/PgDn翻页  Enter粘贴  Del删除  Tab收藏  Esc关闭");
 
   if (m_clipboard_visible.empty()) {
     ctx.cinfo.candies.push_back(Text(L"（没有匹配的剪贴板历史）"));
@@ -962,9 +976,9 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
     }
   }
 
-  ctx.cinfo.currentPage = 0;
-  ctx.cinfo.totalPages = 1;
-  ctx.cinfo.is_last_page = true;
+  ctx.cinfo.currentPage = m_clipboard_page;
+  ctx.cinfo.totalPages = m_clipboard_total_pages;
+  ctx.cinfo.is_last_page = m_clipboard_page + 1 >= m_clipboard_total_pages;
   ctx.cinfo.highlighted = m_clipboard_highlight;
 
   Status status = m_ui->status();
@@ -978,6 +992,11 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
     WeaselSessionId ipc_id) {
   if (keyEvent.mask & ibus::Modifier::RELEASE_MASK)
     return true;
+
+  if (_IsClipboardHotkey(keyEvent)) {
+    _HideClipboardPanel();
+    return true;
+  }
 
   switch (keyEvent.keycode) {
     case ibus::Escape:
@@ -1078,6 +1097,14 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
     return true;
   }
 
+  if (m_clipboard_query.empty() &&
+      !(keyEvent.mask &
+        (ibus::Modifier::CONTROL_MASK | ibus::Modifier::ALT_MASK)) &&
+      keyEvent.keycode >= '1' && keyEvent.keycode <= '8') {
+    _PasteClipboardEntry(ipc_id, keyEvent.keycode - '1');
+    return true;
+  }
+
   if (!(keyEvent.mask &
         (ibus::Modifier::CONTROL_MASK | ibus::Modifier::ALT_MASK)) &&
       keyEvent.keycode >= 0x20 && keyEvent.keycode < 0x7f) {
@@ -1108,6 +1135,8 @@ void RimeWithWeaselHandler::_ToggleClipboardFavorite() {
   }
 
   _SaveClipboardFavorites();
+  m_clipboard_page = 0;
+  m_clipboard_highlight = 0;
   _RefreshClipboardPanel(m_active_session);
 }
 
@@ -1119,7 +1148,7 @@ void RimeWithWeaselHandler::_PasteClipboardEntry(WeaselSessionId ipc_id,
 
   std::wstring text = m_clipboard_visible[index];
   _HideClipboardPanel();
-  Sleep(10);
+  Sleep(30);
   _SetClipboardText(text);
   _SendPasteKey();
   m_active_session = ipc_id;
