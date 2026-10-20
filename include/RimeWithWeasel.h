@@ -4,6 +4,7 @@
 #include <map>
 #include <string>
 #include <mutex>
+#include <vector>
 
 #include <rime_api.h>
 
@@ -91,6 +92,27 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
 
   void _UpdateInlinePreeditStatus(WeaselSessionId ipc_id);
 
+  // Built-in clipboard history panel. The first version reuses the candidate
+  // window and handles text entries only.
+  void _SetupClipboardMonitor();
+  void _TeardownClipboardMonitor();
+  void _LoadClipboardHistory();
+  void _SaveClipboardHistory();
+  void _CaptureClipboardText();
+  void _ShowClipboardPanel(WeaselSessionId ipc_id);
+  void _HideClipboardPanel();
+  void _RefreshClipboardPanel(WeaselSessionId ipc_id);
+  bool _HandleClipboardKey(const weasel::KeyEvent& keyEvent,
+                           WeaselSessionId ipc_id);
+  bool _IsClipboardHotkey(const weasel::KeyEvent& keyEvent) const;
+  void _PasteClipboardEntry(WeaselSessionId ipc_id, int index);
+  void _SetClipboardText(const std::wstring& text);
+  void _SendPasteKey();
+  static LRESULT CALLBACK ClipboardWndProc(HWND hwnd,
+                                           UINT msg,
+                                           WPARAM wParam,
+                                           LPARAM lParam);
+
   RimeSessionId to_session_id(WeaselSessionId ipc_id) {
     return m_session_status_map[ipc_id].session_id;
   }
@@ -126,4 +148,12 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool m_global_ascii_mode;
   int m_show_notifications_time;
   DWORD m_pid;
+
+  bool m_clipboard_mode = false;
+  std::wstring m_clipboard_query;
+  std::vector<std::wstring> m_clipboard_entries;
+  std::vector<std::wstring> m_clipboard_visible;
+  int m_clipboard_highlight = 0;
+  HWND m_clipboard_hwnd = nullptr;
+  std::mutex m_clipboard_mutex;
 };
