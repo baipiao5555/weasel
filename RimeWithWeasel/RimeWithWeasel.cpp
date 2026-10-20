@@ -728,8 +728,10 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
                                             EatLine eat) {
   DLOG(INFO) << "Process key event: keycode = " << keyEvent.keycode
              << ", mask = " << keyEvent.mask << ", ipc_id = " << ipc_id;
-  if (keyEvent.mask & ibus::Modifier::RELEASE_MASK)
+  if ((keyEvent.mask & ibus::Modifier::RELEASE_MASK) &&
+      _IsClipboardHotkeyKey(keyEvent.keycode)) {
     m_clipboard_hotkey_down = false;
+  }
   if (m_disabled)
     return FALSE;
 
@@ -1228,7 +1230,10 @@ bool RimeWithWeaselHandler::_IsClipboardHotkey(
   if ((keyEvent.mask & relevant_modifiers) != m_clipboard_hotkey_modifiers)
     return false;
 
-  int keycode = keyEvent.keycode;
+  return _IsClipboardHotkeyKey(keyEvent.keycode);
+}
+
+bool RimeWithWeaselHandler::_IsClipboardHotkeyKey(int keycode) const {
   if (keycode >= 'a' && keycode <= 'z')
     keycode = std::toupper(static_cast<unsigned char>(keycode));
   int expected = m_clipboard_hotkey_keycode;
@@ -1405,7 +1410,8 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
     const weasel::KeyEvent& keyEvent,
     WeaselSessionId ipc_id) {
   if (keyEvent.mask & ibus::Modifier::RELEASE_MASK) {
-    m_clipboard_hotkey_down = false;
+    if (_IsClipboardHotkeyKey(keyEvent.keycode))
+      m_clipboard_hotkey_down = false;
     if (keyEvent.keycode == ibus::Delete ||
         keyEvent.keycode == ibus::KP_Delete) {
       m_clipboard_clear_key_down = false;

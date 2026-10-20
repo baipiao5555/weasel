@@ -112,6 +112,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool _HandleClipboardKey(const weasel::KeyEvent& keyEvent,
                            WeaselSessionId ipc_id);
   bool _IsClipboardHotkey(const weasel::KeyEvent& keyEvent) const;
+  bool _IsClipboardHotkeyKey(int keycode) const;
   void _PasteClipboardEntry(WeaselSessionId ipc_id, int index);
   bool _SetClipboardEntry(const std::wstring& entry);
   void _SendPasteKey();
