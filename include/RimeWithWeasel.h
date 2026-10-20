@@ -1,6 +1,7 @@
 #pragma once
 #include <WeaselIPC.h>
 #include <WeaselUI.h>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <set>
@@ -154,6 +155,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   DWORD m_pid;
 
   bool m_clipboard_mode = false;
+  std::atomic<bool> m_clipboard_dirty{false};
   std::wstring m_clipboard_query;
   std::vector<std::wstring> m_clipboard_entries;
   std::vector<std::wstring> m_clipboard_visible;
