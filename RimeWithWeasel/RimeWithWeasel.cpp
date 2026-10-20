@@ -1390,8 +1390,12 @@ void RimeWithWeaselHandler::_CleanupClipboardImages() {
 }
 
 void RimeWithWeaselHandler::_CaptureClipboardText() {
-  if (GetTickCount64() <= m_clipboard_ignore_until.load())
+  if (GetTickCount64() <= m_clipboard_ignore_until.load() &&
+      (IsClipboardFormatAvailable(CF_BITMAP) ||
+       IsClipboardFormatAvailable(CF_DIB) ||
+       IsClipboardFormatAvailable(CF_DIBV5))) {
     return;
+  }
   if (ClipboardContentExcluded(m_clipboard_hwnd))
     return;
 
