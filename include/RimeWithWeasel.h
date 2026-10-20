@@ -172,6 +172,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   int m_clipboard_page = 0;
   int m_clipboard_total_pages = 1;
   bool m_clipboard_favorites_only = false;
+  bool m_clipboard_clear_confirm = false;
   HWND m_clipboard_hwnd = nullptr;
   std::mutex m_clipboard_mutex;
 };

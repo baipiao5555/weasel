@@ -1240,6 +1240,7 @@ void RimeWithWeaselHandler::_ShowClipboardPanel(WeaselSessionId ipc_id) {
   m_clipboard_highlight = 0;
   m_clipboard_page = 0;
   m_clipboard_favorites_only = false;
+  m_clipboard_clear_confirm = false;
   m_active_session = ipc_id;
 
   bool history_empty = false;
@@ -1268,6 +1269,7 @@ void RimeWithWeaselHandler::_HideClipboardPanel() {
   m_clipboard_page = 0;
   m_clipboard_total_pages = 1;
   m_clipboard_favorites_only = false;
+  m_clipboard_clear_confirm = false;
 
   if (m_ui)
     m_ui->Hide();
@@ -1335,6 +1337,8 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
 
   Context ctx;
   std::wstring title = L"剪贴板";
+  if (m_clipboard_clear_confirm)
+    title += L" [确认清空]";
   if (m_clipboard_favorites_only)
     title += L" [收藏]";
   title += L" " +
@@ -1348,8 +1352,10 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
     title += L"  搜索:" + m_clipboard_query;
 
   ctx.preedit = Text(title);
-  ctx.aux =
-      Text(L"↑↓选择  PgUp/PgDn翻页  Enter粘贴  Del删除  Tab收藏  Esc关闭");
+  ctx.aux = Text(m_clipboard_clear_confirm
+                     ? L"再按一次 Ctrl+Shift+Delete 清空全部历史  Esc取消"
+                     : L"↑↓选择  PgUp/PgDn翻页  Enter粘贴  Del删除  "
+                       L"Tab收藏  Esc关闭");
 
   if (m_clipboard_visible.empty()) {
     ctx.cinfo.candies.push_back(Text(L"（没有匹配的剪贴板历史）"));
@@ -1390,6 +1396,34 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
     _HideClipboardPanel();
     return true;
   }
+
+  const bool clear_request =
+      (keyEvent.mask & ibus::Modifier::CONTROL_MASK) &&
+      (keyEvent.mask & ibus::Modifier::SHIFT_MASK) &&
+      !(keyEvent.mask & ibus::Modifier::ALT_MASK) &&
+      (keyEvent.keycode == ibus::Delete || keyEvent.keycode == ibus::KP_Delete);
+  if (clear_request) {
+    if (!m_clipboard_clear_confirm) {
+      m_clipboard_clear_confirm = true;
+      _RefreshClipboardPanel(ipc_id);
+    } else {
+      {
+        std::lock_guard<std::mutex> lock(m_clipboard_mutex);
+        m_clipboard_entries.clear();
+        m_clipboard_favorites.clear();
+      }
+      _SaveClipboardHistory();
+      _SaveClipboardFavorites();
+      m_clipboard_clear_confirm = false;
+      m_clipboard_query.clear();
+      m_clipboard_page = 0;
+      m_clipboard_highlight = 0;
+      m_clipboard_favorites_only = false;
+      _RefreshClipboardPanel(ipc_id);
+    }
+    return true;
+  }
+  m_clipboard_clear_confirm = false;
 
   switch (keyEvent.keycode) {
     case ibus::Escape:
