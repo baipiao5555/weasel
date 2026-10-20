@@ -43,6 +43,7 @@ constexpr size_t kClipboardVisibleLimit = 8;
 constexpr size_t kClipboardDisplayLength = 56;
 constexpr size_t kClipboardMaxTextLength = 256 * 1024;
 constexpr uint32_t kClipboardMaxStoredEntry = 4u << 20;
+constexpr size_t kClipboardMaxTotalChars = 32u << 20;
 constexpr size_t kClipboardMaxFiles = 100;
 constexpr size_t kClipboardMaxFileListChars = 32 * 1024;
 const wchar_t kClipboardWindowClass[] = L"WeaselClipboardMonitor";
@@ -848,6 +849,7 @@ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
   DLOG(INFO) << "Focus out: ipc_id = " << ipc_id;
   if (m_clipboard_mode)
     _HideClipboardPanel();
+  m_clipboard_hotkey_down = false;
   if (m_ui)
     m_ui->Hide();
   m_active_session = 0;
@@ -1121,12 +1123,15 @@ void RimeWithWeaselHandler::_LoadClipboardHistory() {
   uint32_t count = 0;
   if (fread(&count, sizeof(count), 1, file) == 1) {
     count = (std::min)(count, static_cast<uint32_t>(m_clipboard_history_limit));
+    size_t total_chars = 0;
     for (uint32_t i = 0; i < count; ++i) {
       uint32_t length = 0;
       if (fread(&length, sizeof(length), 1, file) != 1 ||
-          length > kClipboardMaxStoredEntry) {
+          length > kClipboardMaxStoredEntry ||
+          total_chars + length > kClipboardMaxTotalChars) {
         break;
       }
+      total_chars += length;
 
       std::wstring text(length, L'\0');
       if (length > 0 &&
@@ -1159,12 +1164,15 @@ void RimeWithWeaselHandler::_LoadClipboardFavorites() {
   uint32_t count = 0;
   if (fread(&count, sizeof(count), 1, file) == 1) {
     count = (std::min)(count, 1000u);
+    size_t total_chars = 0;
     for (uint32_t i = 0; i < count; ++i) {
       uint32_t length = 0;
       if (fread(&length, sizeof(length), 1, file) != 1 ||
-          length > kClipboardMaxStoredEntry) {
+          length > kClipboardMaxStoredEntry ||
+          total_chars + length > kClipboardMaxTotalChars) {
         break;
       }
+      total_chars += length;
 
       std::wstring text(length, L'\0');
       if (length > 0 &&
@@ -1212,6 +1220,15 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
     m_clipboard_entries.insert(m_clipboard_entries.begin(), entry);
     if (m_clipboard_entries.size() > m_clipboard_history_limit)
       m_clipboard_entries.resize(m_clipboard_history_limit);
+
+    size_t total_chars = 0;
+    for (const auto& item : m_clipboard_entries)
+      total_chars += item.size();
+    while (m_clipboard_entries.size() > 1 &&
+           total_chars > kClipboardMaxTotalChars) {
+      total_chars -= m_clipboard_entries.back().size();
+      m_clipboard_entries.pop_back();
+    }
   }
 
   _SaveClipboardHistory();
@@ -1329,8 +1346,9 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel() {
       filtered.begin(), filtered.end(),
       [](const Item& a, const Item& b) { return a.favorite && !b.favorite; });
 
-  size_t total_pages =
-      (filtered.size() + m_clipboard_page_size - 1) / m_clipboard_page_size;
+  const size_t page_size =
+      (std::max)(m_clipboard_page_size, static_cast<size_t>(1));
+  size_t total_pages = (filtered.size() + page_size - 1) / page_size;
   if (total_pages == 0)
     total_pages = 1;
 
@@ -1340,18 +1358,17 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel() {
   if (m_clipboard_page >= m_clipboard_total_pages)
     m_clipboard_page = m_clipboard_total_pages - 1;
 
-  size_t begin = static_cast<size_t>(m_clipboard_page) * m_clipboard_page_size;
-  size_t end = (std::min)(begin + m_clipboard_page_size, filtered.size());
+  size_t begin = static_cast<size_t>(m_clipboard_page) * page_size;
+  size_t end = (std::min)(begin + page_size, filtered.size());
 
   m_clipboard_visible.clear();
   for (size_t i = begin; i < end; ++i)
     m_clipboard_visible.push_back(filtered[i].text);
 
-  if (m_clipboard_visible.empty()) {
+  if (m_clipboard_visible.empty() || m_clipboard_highlight < 0) {
     m_clipboard_highlight = 0;
-  } else if (m_clipboard_highlight < 0 ||
-             m_clipboard_highlight >=
-                 static_cast<int>(m_clipboard_visible.size())) {
+  } else if (m_clipboard_highlight >=
+             static_cast<int>(m_clipboard_visible.size())) {
     m_clipboard_highlight = static_cast<int>(m_clipboard_visible.size()) - 1;
   }
 
@@ -1576,6 +1593,14 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
 
   if (ctrl_only && (keyEvent.keycode == 'D' || keyEvent.keycode == 'd')) {
     _ToggleClipboardFavorite();
+    return true;
+  }
+
+  if (ctrl_only && (keyEvent.keycode == 'F' || keyEvent.keycode == 'f')) {
+    m_clipboard_favorites_only = !m_clipboard_favorites_only;
+    m_clipboard_page = 0;
+    m_clipboard_highlight = 0;
+    _RefreshClipboardPanel();
     return true;
   }
 
