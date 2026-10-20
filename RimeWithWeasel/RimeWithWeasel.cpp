@@ -1071,7 +1071,7 @@ void RimeWithWeaselHandler::_LoadClipboardHistory() {
     count = (std::min)(count, static_cast<uint32_t>(m_clipboard_history_limit));
     for (uint32_t i = 0; i < count; ++i) {
       uint32_t length = 0;
-      if (fread(&length, sizeof(length), 1, file) != 1 || length > (1u << 20)) {
+      if (fread(&length, sizeof(length), 1, file) != 1 || length > (4u << 20)) {
         break;
       }
 
@@ -1131,7 +1131,7 @@ void RimeWithWeaselHandler::_LoadClipboardFavorites() {
     count = (std::min)(count, 1000u);
     for (uint32_t i = 0; i < count; ++i) {
       uint32_t length = 0;
-      if (fread(&length, sizeof(length), 1, file) != 1 || length > (1u << 20)) {
+      if (fread(&length, sizeof(length), 1, file) != 1 || length > (4u << 20)) {
         break;
       }
 
