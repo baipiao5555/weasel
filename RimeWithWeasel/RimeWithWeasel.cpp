@@ -1390,6 +1390,8 @@ void RimeWithWeaselHandler::_CleanupClipboardImages() {
 }
 
 void RimeWithWeaselHandler::_CaptureClipboardText() {
+  if (GetTickCount64() <= m_clipboard_ignore_until.load())
+    return;
   if (ClipboardContentExcluded(m_clipboard_hwnd))
     return;
 
@@ -1890,9 +1892,14 @@ void RimeWithWeaselHandler::_PasteClipboardEntry(WeaselSessionId ipc_id,
   }
 
   std::wstring entry = m_clipboard_visible[index];
+  const bool image_entry = IsImageEntry(entry);
+  if (image_entry)
+    m_clipboard_ignore_until = GetTickCount64() + 300;
   _HideClipboardPanel();
   Sleep(30);
   if (!_SetClipboardEntry(entry)) {
+    if (image_entry)
+      m_clipboard_ignore_until = 0;
     LOG(WARNING) << "failed to set clipboard entry";
     return;
   }

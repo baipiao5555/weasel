@@ -180,6 +180,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool m_clipboard_favorites_only = false;
   bool m_clipboard_clear_confirm = false;
   bool m_clipboard_clear_key_down = false;
+  std::atomic<unsigned long long> m_clipboard_ignore_until{0};
   ULONG_PTR m_gdiplus_token = 0;
   HWND m_clipboard_hwnd = nullptr;
   std::mutex m_clipboard_mutex;
