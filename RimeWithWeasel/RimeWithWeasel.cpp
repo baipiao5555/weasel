@@ -18,7 +18,6 @@
 #include <set>
 #include <utility>
 #include <vector>
-#include <shellapi.h>
 #include <rime_api.h>
 
 #define TRANSPARENT_COLOR 0x00000000
@@ -50,6 +49,15 @@ const wchar_t kClipboardWindowClass[] = L"WeaselClipboardMonitor";
 // unambiguous without changing the on-disk format.
 const wchar_t kFileEntryPrefix[] = L"\x01FILES\x01";
 const wchar_t kFileEntrySeparator = L'\x1F';
+
+// Same layout as DROPFILES from shellapi.h. Defining it locally keeps the
+// clipboard code independent of shell header include ordering.
+struct ClipboardDropFiles {
+  DWORD pFiles;
+  POINT pt;
+  BOOL fNC;
+  BOOL fWide;
+};
 
 std::wstring ClipboardHistoryPath() {
   return (WeaselUserDataPath() / L"weasel-clipboard-history.dat").wstring();
@@ -176,8 +184,8 @@ std::vector<std::wstring> ReadClipboardFiles(HWND owner) {
   if (data) {
     const SIZE_T size = GlobalSize(data);
     const auto* base = static_cast<const BYTE*>(GlobalLock(data));
-    if (base && size >= sizeof(DROPFILES)) {
-      const auto* drop = reinterpret_cast<const DROPFILES*>(base);
+    if (base && size >= sizeof(ClipboardDropFiles)) {
+      const auto* drop = reinterpret_cast<const ClipboardDropFiles*>(base);
       if (drop->pFiles < size) {
         const BYTE* p = base + drop->pFiles;
         const BYTE* end = base + size;
@@ -315,21 +323,21 @@ bool WriteClipboardFiles(HWND owner, const std::vector<std::wstring>& files) {
   for (const auto& file : files)
     chars += file.size() + 1;
 
-  const size_t bytes = sizeof(DROPFILES) + chars * sizeof(wchar_t);
+  const size_t bytes = sizeof(ClipboardDropFiles) + chars * sizeof(wchar_t);
   HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
   if (!data)
     return false;
 
-  auto* drop = static_cast<DROPFILES*>(GlobalLock(data));
+  auto* drop = static_cast<ClipboardDropFiles*>(GlobalLock(data));
   if (!drop) {
     GlobalFree(data);
     return false;
   }
 
-  drop->pFiles = sizeof(DROPFILES);
+  drop->pFiles = sizeof(ClipboardDropFiles);
   drop->fWide = TRUE;
   auto* p = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(drop) +
-                                       sizeof(DROPFILES));
+                                       sizeof(ClipboardDropFiles));
   for (const auto& file : files) {
     memcpy(p, file.c_str(), (file.size() + 1) * sizeof(wchar_t));
     p += file.size() + 1;
