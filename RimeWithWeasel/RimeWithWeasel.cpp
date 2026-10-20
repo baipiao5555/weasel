@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <filesystem>
 #include <map>
@@ -17,6 +18,7 @@
 #include <set>
 #include <utility>
 #include <vector>
+#include <shellapi.h>
 #include <rime_api.h>
 
 #define TRANSPARENT_COLOR 0x00000000
@@ -40,7 +42,14 @@ constexpr size_t kClipboardHistoryLimit = 100;
 constexpr size_t kClipboardVisibleLimit = 8;
 constexpr size_t kClipboardDisplayLength = 56;
 constexpr size_t kClipboardMaxTextLength = 256 * 1024;
+constexpr size_t kClipboardMaxFiles = 100;
+constexpr size_t kClipboardMaxFileListChars = 32 * 1024;
 const wchar_t kClipboardWindowClass[] = L"WeaselClipboardMonitor";
+// File entries are stored in the same string history as text. The control
+// characters cannot appear in Windows paths, so they keep the encoding
+// unambiguous without changing the on-disk format.
+const wchar_t kFileEntryPrefix[] = L"\x01FILES\x01";
+const wchar_t kFileEntrySeparator = L'\x1F';
 
 std::wstring ClipboardHistoryPath() {
   return (WeaselUserDataPath() / L"weasel-clipboard-history.dat").wstring();
@@ -68,6 +77,60 @@ std::wstring SanitizeClipboardText(const std::wstring& text) {
   if (result.empty())
     result = L"(空)";
   return result;
+}
+
+bool IsFileEntry(const std::wstring& entry) {
+  return entry.rfind(kFileEntryPrefix, 0) == 0;
+}
+
+std::wstring EncodeFileEntry(const std::vector<std::wstring>& files) {
+  std::wstring result = kFileEntryPrefix;
+  for (size_t i = 0; i < files.size(); ++i) {
+    if (i > 0)
+      result.push_back(kFileEntrySeparator);
+    result += files[i];
+  }
+  return result;
+}
+
+std::vector<std::wstring> DecodeFileEntry(const std::wstring& entry) {
+  std::vector<std::wstring> files;
+  size_t start = std::wcslen(kFileEntryPrefix);
+  while (start < entry.size()) {
+    size_t end = entry.find(kFileEntrySeparator, start);
+    if (end == std::wstring::npos)
+      end = entry.size();
+    if (end > start)
+      files.emplace_back(entry, start, end - start);
+    start = end + 1;
+  }
+  return files;
+}
+
+std::wstring ClipboardEntryDisplay(const std::wstring& entry) {
+  if (!IsFileEntry(entry))
+    return SanitizeClipboardText(entry);
+
+  const std::vector<std::wstring> files = DecodeFileEntry(entry);
+  if (files.empty())
+    return L"[文件] (空)";
+
+  std::wstring name = files.front();
+  try {
+    std::wstring filename =
+        std::filesystem::path(files.front()).filename().wstring();
+    if (!filename.empty())
+      name = std::move(filename);
+  } catch (...) {
+  }
+
+  std::wstring display = L"[文件] " + name;
+  if (files.size() > 1) {
+    display += L" 等 " +
+               std::to_wstring(static_cast<unsigned long long>(files.size())) +
+               L" 个文件";
+  }
+  return SanitizeClipboardText(display);
 }
 
 bool ContainsCaseInsensitive(const std::wstring& haystack,
@@ -100,6 +163,82 @@ std::wstring ReadClipboardText(HWND owner) {
 
   CloseClipboard();
   return result;
+}
+
+std::vector<std::wstring> ReadClipboardFiles(HWND owner) {
+  std::vector<std::wstring> files;
+  if (!IsClipboardFormatAvailable(CF_HDROP))
+    return files;
+  if (!OpenClipboard(owner))
+    return files;
+
+  HANDLE data = GetClipboardData(CF_HDROP);
+  if (data) {
+    const SIZE_T size = GlobalSize(data);
+    const auto* base = static_cast<const BYTE*>(GlobalLock(data));
+    if (base && size >= sizeof(DROPFILES)) {
+      const auto* drop = reinterpret_cast<const DROPFILES*>(base);
+      if (drop->pFiles < size) {
+        const BYTE* p = base + drop->pFiles;
+        const BYTE* end = base + size;
+        size_t total_chars = 0;
+
+        if (drop->fWide) {
+          std::wstring current;
+          while (p + sizeof(wchar_t) <= end) {
+            wchar_t c = L'\0';
+            memcpy(&c, p, sizeof(c));
+            p += sizeof(wchar_t);
+            if (c == L'\0') {
+              if (current.empty())
+                break;
+              total_chars += current.size();
+              if (total_chars > kClipboardMaxFileListChars)
+                break;
+              files.push_back(current);
+              current.clear();
+              if (files.size() >= kClipboardMaxFiles)
+                break;
+            } else {
+              current.push_back(c);
+            }
+          }
+        } else {
+          std::string current;
+          while (p < end) {
+            const char c = static_cast<char>(*p++);
+            if (c == '\0') {
+              if (current.empty())
+                break;
+              const int wlen = MultiByteToWideChar(
+                  CP_ACP, 0, current.data(), static_cast<int>(current.size()),
+                  nullptr, 0);
+              if (wlen > 0) {
+                std::wstring wide(wlen, L'\0');
+                MultiByteToWideChar(CP_ACP, 0, current.data(),
+                                    static_cast<int>(current.size()),
+                                    wide.data(), wlen);
+                total_chars += wide.size();
+                if (total_chars > kClipboardMaxFileListChars)
+                  break;
+                files.push_back(std::move(wide));
+              }
+              current.clear();
+              if (files.size() >= kClipboardMaxFiles)
+                break;
+            } else {
+              current.push_back(c);
+            }
+          }
+        }
+      }
+    }
+    if (base)
+      GlobalUnlock(data);
+  }
+
+  CloseClipboard();
+  return files;
 }
 
 bool ClipboardContentExcluded(HWND owner) {
@@ -140,12 +279,13 @@ bool CommitTempFile(const std::wstring& temp_path,
   return false;
 }
 
-void WriteClipboardText(HWND owner, const std::wstring& text) {
+bool WriteClipboardText(HWND owner, const std::wstring& text) {
   if (!OpenClipboard(owner))
-    return;
+    return false;
 
   EmptyClipboard();
 
+  bool ok = false;
   const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
   HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, bytes);
   if (data) {
@@ -153,8 +293,10 @@ void WriteClipboardText(HWND owner, const std::wstring& text) {
     if (buffer) {
       memcpy(buffer, text.c_str(), bytes);
       GlobalUnlock(data);
-      if (SetClipboardData(CF_UNICODETEXT, data))
+      if (SetClipboardData(CF_UNICODETEXT, data)) {
         data = nullptr;
+        ok = true;
+      }
     }
   }
 
@@ -162,6 +304,55 @@ void WriteClipboardText(HWND owner, const std::wstring& text) {
     GlobalFree(data);
 
   CloseClipboard();
+  return ok;
+}
+
+bool WriteClipboardFiles(HWND owner, const std::vector<std::wstring>& files) {
+  if (files.empty())
+    return false;
+
+  size_t chars = 1;
+  for (const auto& file : files)
+    chars += file.size() + 1;
+
+  const size_t bytes = sizeof(DROPFILES) + chars * sizeof(wchar_t);
+  HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+  if (!data)
+    return false;
+
+  auto* drop = static_cast<DROPFILES*>(GlobalLock(data));
+  if (!drop) {
+    GlobalFree(data);
+    return false;
+  }
+
+  drop->pFiles = sizeof(DROPFILES);
+  drop->fWide = TRUE;
+  auto* p = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(drop) +
+                                       sizeof(DROPFILES));
+  for (const auto& file : files) {
+    memcpy(p, file.c_str(), (file.size() + 1) * sizeof(wchar_t));
+    p += file.size() + 1;
+  }
+  *p = L'\0';
+  GlobalUnlock(data);
+
+  if (!OpenClipboard(owner)) {
+    GlobalFree(data);
+    return false;
+  }
+
+  bool ok = false;
+  EmptyClipboard();
+  if (SetClipboardData(CF_HDROP, data)) {
+    data = nullptr;
+    ok = true;
+  }
+  if (data)
+    GlobalFree(data);
+
+  CloseClipboard();
+  return ok;
 }
 
 }  // namespace
@@ -872,18 +1063,26 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
   if (ClipboardContentExcluded(m_clipboard_hwnd))
     return;
 
-  std::wstring text = ReadClipboardText(m_clipboard_hwnd);
-  if (text.empty() || text.size() > kClipboardMaxTextLength)
-    return;
+  std::wstring entry;
+  const std::vector<std::wstring> files = ReadClipboardFiles(m_clipboard_hwnd);
+  if (!files.empty()) {
+    entry = EncodeFileEntry(files);
+    if (entry.size() > kClipboardMaxFileListChars)
+      return;
+  } else {
+    entry = ReadClipboardText(m_clipboard_hwnd);
+    if (entry.empty() || entry.size() > kClipboardMaxTextLength)
+      return;
+  }
 
   {
     std::lock_guard<std::mutex> lock(m_clipboard_mutex);
-    auto it =
-        std::find(m_clipboard_entries.begin(), m_clipboard_entries.end(), text);
+    auto it = std::find(m_clipboard_entries.begin(), m_clipboard_entries.end(),
+                        entry);
     if (it != m_clipboard_entries.end())
       m_clipboard_entries.erase(it);
 
-    m_clipboard_entries.insert(m_clipboard_entries.begin(), text);
+    m_clipboard_entries.insert(m_clipboard_entries.begin(), entry);
     if (m_clipboard_entries.size() > kClipboardHistoryLimit)
       m_clipboard_entries.resize(kClipboardHistoryLimit);
   }
@@ -1036,8 +1235,9 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
       const auto& text = m_clipboard_visible[i];
       bool favorite = favorites.find(text) != favorites.end();
       ctx.cinfo.labels.push_back(Text(std::to_wstring(i + 1)));
-      ctx.cinfo.candies.push_back(Text(SanitizeClipboardText(text)));
-      ctx.cinfo.comments.push_back(Text(favorite ? L"★ 收藏" : L"历史"));
+      ctx.cinfo.candies.push_back(Text(ClipboardEntryDisplay(text)));
+      ctx.cinfo.comments.push_back(
+          Text(favorite ? L"★ 收藏" : (IsFileEntry(text) ? L"文件" : L"历史")));
     }
   }
 
@@ -1214,16 +1414,19 @@ void RimeWithWeaselHandler::_PasteClipboardEntry(WeaselSessionId ipc_id,
     return;
   }
 
-  std::wstring text = m_clipboard_visible[index];
+  std::wstring entry = m_clipboard_visible[index];
   _HideClipboardPanel();
   Sleep(30);
-  _SetClipboardText(text);
+  if (!_SetClipboardEntry(entry))
+    return;
   _SendPasteKey();
   m_active_session = ipc_id;
 }
 
-void RimeWithWeaselHandler::_SetClipboardText(const std::wstring& text) {
-  WriteClipboardText(m_clipboard_hwnd, text);
+bool RimeWithWeaselHandler::_SetClipboardEntry(const std::wstring& entry) {
+  if (IsFileEntry(entry))
+    return WriteClipboardFiles(m_clipboard_hwnd, DecodeFileEntry(entry));
+  return WriteClipboardText(m_clipboard_hwnd, entry);
 }
 
 void RimeWithWeaselHandler::_SendPasteKey() {

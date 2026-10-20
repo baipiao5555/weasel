@@ -111,7 +111,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
                            WeaselSessionId ipc_id);
   bool _IsClipboardHotkey(const weasel::KeyEvent& keyEvent) const;
   void _PasteClipboardEntry(WeaselSessionId ipc_id, int index);
-  void _SetClipboardText(const std::wstring& text);
+  bool _SetClipboardEntry(const std::wstring& entry);
   void _SendPasteKey();
   static LRESULT CALLBACK ClipboardWndProc(HWND hwnd,
                                            UINT msg,
