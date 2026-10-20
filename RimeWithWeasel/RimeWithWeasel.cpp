@@ -1318,52 +1318,54 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel() {
   if (!m_ui)
     return;
 
-  std::vector<std::wstring> entries;
-  std::set<std::wstring> favorites;
-  {
-    std::lock_guard<std::mutex> lock(m_clipboard_mutex);
-    entries = m_clipboard_entries;
-    favorites = m_clipboard_favorites;
-  }
-
   struct Item {
-    std::wstring text;
+    size_t index;
     bool favorite;
   };
 
   std::vector<Item> filtered;
-  for (const auto& entry : entries) {
-    bool favorite = favorites.find(entry) != favorites.end();
-    if (m_clipboard_favorites_only && !favorite)
-      continue;
-    if (!ContainsCaseInsensitive(entry, m_clipboard_query))
-      continue;
+  std::vector<bool> visible_favorites;
+  {
+    std::lock_guard<std::mutex> lock(m_clipboard_mutex);
+    filtered.reserve(m_clipboard_entries.size());
+    for (size_t i = 0; i < m_clipboard_entries.size(); ++i) {
+      const auto& entry = m_clipboard_entries[i];
+      const bool favorite =
+          m_clipboard_favorites.find(entry) != m_clipboard_favorites.end();
+      if (m_clipboard_favorites_only && !favorite)
+        continue;
+      if (!ContainsCaseInsensitive(entry, m_clipboard_query))
+        continue;
+      filtered.push_back(Item{i, favorite});
+    }
 
-    filtered.push_back(Item{entry, favorite});
+    std::stable_sort(
+        filtered.begin(), filtered.end(),
+        [](const Item& a, const Item& b) { return a.favorite && !b.favorite; });
+
+    const size_t page_size =
+        (std::max)(m_clipboard_page_size, static_cast<size_t>(1));
+    size_t total_pages = (filtered.size() + page_size - 1) / page_size;
+    if (total_pages == 0)
+      total_pages = 1;
+
+    m_clipboard_total_pages = static_cast<int>(total_pages);
+    if (m_clipboard_page < 0)
+      m_clipboard_page = 0;
+    if (m_clipboard_page >= m_clipboard_total_pages)
+      m_clipboard_page = m_clipboard_total_pages - 1;
+
+    const size_t begin = static_cast<size_t>(m_clipboard_page) * page_size;
+    const size_t end = (std::min)(begin + page_size, filtered.size());
+
+    m_clipboard_visible.clear();
+    visible_favorites.clear();
+    visible_favorites.reserve(end - begin);
+    for (size_t i = begin; i < end; ++i) {
+      m_clipboard_visible.push_back(m_clipboard_entries[filtered[i].index]);
+      visible_favorites.push_back(filtered[i].favorite);
+    }
   }
-
-  std::stable_sort(
-      filtered.begin(), filtered.end(),
-      [](const Item& a, const Item& b) { return a.favorite && !b.favorite; });
-
-  const size_t page_size =
-      (std::max)(m_clipboard_page_size, static_cast<size_t>(1));
-  size_t total_pages = (filtered.size() + page_size - 1) / page_size;
-  if (total_pages == 0)
-    total_pages = 1;
-
-  m_clipboard_total_pages = static_cast<int>(total_pages);
-  if (m_clipboard_page < 0)
-    m_clipboard_page = 0;
-  if (m_clipboard_page >= m_clipboard_total_pages)
-    m_clipboard_page = m_clipboard_total_pages - 1;
-
-  size_t begin = static_cast<size_t>(m_clipboard_page) * page_size;
-  size_t end = (std::min)(begin + page_size, filtered.size());
-
-  m_clipboard_visible.clear();
-  for (size_t i = begin; i < end; ++i)
-    m_clipboard_visible.push_back(filtered[i].text);
 
   if (m_clipboard_visible.empty() || m_clipboard_highlight < 0) {
     m_clipboard_highlight = 0;
@@ -1401,7 +1403,7 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel() {
   } else {
     for (size_t i = 0; i < m_clipboard_visible.size(); ++i) {
       const auto& text = m_clipboard_visible[i];
-      bool favorite = favorites.find(text) != favorites.end();
+      const bool favorite = visible_favorites[i];
       ctx.cinfo.labels.push_back(Text(std::to_wstring(i + 1)));
       ctx.cinfo.candies.push_back(Text(ClipboardEntryDisplay(text)));
       ctx.cinfo.comments.push_back(
