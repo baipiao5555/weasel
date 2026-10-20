@@ -164,6 +164,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   UINT m_clipboard_hotkey_modifiers =
       ibus::Modifier::CONTROL_MASK | ibus::Modifier::SHIFT_MASK;
   int m_clipboard_hotkey_keycode = 'V';
+  bool m_clipboard_hotkey_down = false;
   std::atomic<bool> m_clipboard_dirty{false};
   std::wstring m_clipboard_query;
   std::vector<std::wstring> m_clipboard_entries;

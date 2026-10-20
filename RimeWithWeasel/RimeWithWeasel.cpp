@@ -728,6 +728,8 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
                                             EatLine eat) {
   DLOG(INFO) << "Process key event: keycode = " << keyEvent.keycode
              << ", mask = " << keyEvent.mask << ", ipc_id = " << ipc_id;
+  if (keyEvent.mask & ibus::Modifier::RELEASE_MASK)
+    m_clipboard_hotkey_down = false;
   if (m_disabled)
     return FALSE;
 
@@ -735,7 +737,10 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
     return _HandleClipboardKey(keyEvent, ipc_id) ? TRUE : FALSE;
 
   if (_IsClipboardHotkey(keyEvent)) {
-    _ShowClipboardPanel(ipc_id);
+    if (!m_clipboard_hotkey_down) {
+      m_clipboard_hotkey_down = true;
+      _ShowClipboardPanel(ipc_id);
+    }
     return TRUE;
   }
 
@@ -1069,6 +1074,9 @@ void RimeWithWeaselHandler::_LoadClipboardSettings(RimeConfig* config) {
   m_clipboard_hotkey_modifiers =
       ibus::Modifier::CONTROL_MASK | ibus::Modifier::SHIFT_MASK;
   m_clipboard_hotkey_keycode = 'V';
+  m_clipboard_hotkey_down = false;
+  m_clipboard_clear_confirm = false;
+  m_clipboard_clear_key_down = false;
 
   if (!config)
     return;
@@ -1397,6 +1405,7 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
     const weasel::KeyEvent& keyEvent,
     WeaselSessionId ipc_id) {
   if (keyEvent.mask & ibus::Modifier::RELEASE_MASK) {
+    m_clipboard_hotkey_down = false;
     if (keyEvent.keycode == ibus::Delete ||
         keyEvent.keycode == ibus::KP_Delete) {
       m_clipboard_clear_key_down = false;
@@ -1408,7 +1417,10 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
     _RefreshClipboardPanel();
 
   if (_IsClipboardHotkey(keyEvent)) {
-    _HideClipboardPanel();
+    if (!m_clipboard_hotkey_down) {
+      m_clipboard_hotkey_down = true;
+      _HideClipboardPanel();
+    }
     return true;
   }
 
@@ -1626,8 +1638,10 @@ void RimeWithWeaselHandler::_PasteClipboardEntry(WeaselSessionId ipc_id,
   std::wstring entry = m_clipboard_visible[index];
   _HideClipboardPanel();
   Sleep(30);
-  if (!_SetClipboardEntry(entry))
+  if (!_SetClipboardEntry(entry)) {
+    LOG(WARNING) << "failed to set clipboard entry";
     return;
+  }
   _SendPasteKey();
   m_active_session = ipc_id;
 }
