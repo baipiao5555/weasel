@@ -250,6 +250,26 @@ void RimeWithWeaselHandler::Initialize() {
   _LoadClipboardHistory();
   _LoadClipboardFavorites();
   _SetupClipboardMonitor();
+
+  if (m_ui) {
+    m_ui->SetUICallBack([this](size_t* const sel, size_t* const hov,
+                               bool* const next, bool* const scroll_next) {
+      if (!m_clipboard_mode)
+        return;
+
+      if (sel) {
+        _PasteClipboardEntry(m_active_session, static_cast<int>(*sel));
+      } else if (hov) {
+        m_clipboard_highlight = static_cast<int>(*hov);
+        _RefreshClipboardPanel(m_active_session);
+      } else if (next) {
+        ChangePage(!*next, m_active_session, EatLine());
+      } else if (scroll_next) {
+        ChangePage(!*scroll_next, m_active_session, EatLine());
+      }
+    });
+  }
+
   m_last_schema_id.clear();
 }
 
