@@ -2,8 +2,9 @@
 #include <WeaselIPC.h>
 #include <WeaselUI.h>
 #include <map>
-#include <string>
 #include <mutex>
+#include <set>
+#include <string>
 #include <vector>
 
 #include <rime_api.h>
@@ -98,7 +99,10 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   void _TeardownClipboardMonitor();
   void _LoadClipboardHistory();
   void _SaveClipboardHistory();
+  void _LoadClipboardFavorites();
+  void _SaveClipboardFavorites();
   void _CaptureClipboardText();
+  void _ToggleClipboardFavorite();
   void _ShowClipboardPanel(WeaselSessionId ipc_id);
   void _HideClipboardPanel();
   void _RefreshClipboardPanel(WeaselSessionId ipc_id);
@@ -153,7 +157,11 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   std::wstring m_clipboard_query;
   std::vector<std::wstring> m_clipboard_entries;
   std::vector<std::wstring> m_clipboard_visible;
+  std::set<std::wstring> m_clipboard_favorites;
   int m_clipboard_highlight = 0;
+  int m_clipboard_page = 0;
+  int m_clipboard_total_pages = 1;
+  bool m_clipboard_favorites_only = false;
   HWND m_clipboard_hwnd = nullptr;
   std::mutex m_clipboard_mutex;
 };
