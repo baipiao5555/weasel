@@ -1911,8 +1911,8 @@ bool RimeWithWeaselHandler::_SetClipboardImage(const std::wstring& path) {
 
   Gdiplus::Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
   Gdiplus::BitmapData data = {};
-  if (bitmap->LockBits(&rect, Gdiplus::ImageLockModeRead,
-                       Gdiplus::PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
+  if (bitmap->LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB,
+                       &data) != Gdiplus::Ok) {
     delete bitmap;
     return false;
   }
