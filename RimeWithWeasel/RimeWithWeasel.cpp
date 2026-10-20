@@ -194,6 +194,31 @@ std::wstring MakeClipboardImagePath() {
       .wstring();
 }
 
+bool HashFile(const std::wstring& path, uint64_t* hash) {
+  if (!hash)
+    return false;
+
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || !file)
+    return false;
+
+  uint64_t value = 14695981039346656037ULL;
+  BYTE buffer[64 * 1024];
+  size_t read = 0;
+  while ((read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    for (size_t i = 0; i < read; ++i) {
+      value ^= buffer[i];
+      value *= 1099511628211ULL;
+    }
+  }
+
+  const bool ok = !ferror(file);
+  fclose(file);
+  if (ok)
+    *hash = value;
+  return ok;
+}
+
 bool GetPngEncoderClsid(CLSID* clsid) {
   UINT count = 0;
   UINT size = 0;
@@ -2079,21 +2104,44 @@ bool RimeWithWeaselHandler::_CaptureClipboardImage(std::wstring* path,
         h <= static_cast<UINT>(kClipboardMaxImageDimension)) {
       CLSID png_clsid = {};
       if (GetPngEncoderClsid(&png_clsid)) {
-        const std::wstring file_path = MakeClipboardImagePath();
-        if (bitmap->Save(file_path.c_str(), &png_clsid, nullptr) ==
+        const std::wstring temp_path = MakeClipboardImagePath();
+        if (bitmap->Save(temp_path.c_str(), &png_clsid, nullptr) ==
             Gdiplus::Ok) {
-          std::error_code ec;
-          const auto file_size = std::filesystem::file_size(file_path, ec);
-          if (!ec && file_size <= kClipboardMaxImageFileBytes) {
-            *path = file_path;
-            *width = static_cast<int>(w);
-            *height = static_cast<int>(h);
-            ok = true;
+          uint64_t hash = 0;
+          if (HashFile(temp_path, &hash)) {
+            wchar_t filename[32] = {};
+            std::swprintf(filename, 32, L"%016llX.png",
+                          static_cast<unsigned long long>(hash));
+            const std::wstring final_path =
+                (std::filesystem::path(ClipboardImageDirectory()) / filename)
+                    .wstring();
+            if (GetFileAttributesW(final_path.c_str()) ==
+                INVALID_FILE_ATTRIBUTES) {
+              if (!MoveFileExW(temp_path.c_str(), final_path.c_str(),
+                               MOVEFILE_WRITE_THROUGH)) {
+                DeleteFileW(temp_path.c_str());
+              }
+            } else {
+              DeleteFileW(temp_path.c_str());
+            }
+
+            std::error_code ec;
+            const auto file_size = std::filesystem::file_size(final_path, ec);
+            if (!ec && file_size <= kClipboardMaxImageFileBytes &&
+                GetFileAttributesW(final_path.c_str()) !=
+                    INVALID_FILE_ATTRIBUTES) {
+              *path = final_path;
+              *width = static_cast<int>(w);
+              *height = static_cast<int>(h);
+              ok = true;
+            } else {
+              DeleteFileW(final_path.c_str());
+            }
           } else {
-            DeleteFileW(file_path.c_str());
+            DeleteFileW(temp_path.c_str());
           }
         } else {
-          DeleteFileW(file_path.c_str());
+          DeleteFileW(temp_path.c_str());
         }
       }
     }
