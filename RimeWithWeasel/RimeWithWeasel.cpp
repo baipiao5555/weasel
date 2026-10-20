@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -287,6 +288,72 @@ bool CommitTempFile(const std::wstring& temp_path,
   return false;
 }
 
+bool EqualsIgnoreCase(const std::string& text, const char* expected) {
+  size_t i = 0;
+  for (; i < text.size() && expected[i] != '\0'; ++i) {
+    if (std::tolower(static_cast<unsigned char>(text[i])) !=
+        std::tolower(static_cast<unsigned char>(expected[i])))
+      return false;
+  }
+  return i == text.size() && expected[i] == '\0';
+}
+
+std::string TrimAscii(const std::string& text) {
+  const size_t begin = text.find_first_not_of(" \t");
+  if (begin == std::string::npos)
+    return std::string();
+  const size_t end = text.find_last_not_of(" \t");
+  return text.substr(begin, end - begin + 1);
+}
+
+bool ParseClipboardHotkey(const std::string& text,
+                          UINT* modifiers,
+                          int* keycode) {
+  if (!modifiers || !keycode)
+    return false;
+
+  UINT mods = 0;
+  int key = 0;
+  size_t start = 0;
+  while (start <= text.size()) {
+    const size_t end = text.find('+', start);
+    const std::string token = TrimAscii(text.substr(
+        start, end == std::string::npos ? std::string::npos : end - start));
+    if (token.empty())
+      return false;
+
+    if (EqualsIgnoreCase(token, "control") || EqualsIgnoreCase(token, "ctrl")) {
+      mods |= ibus::Modifier::CONTROL_MASK;
+    } else if (EqualsIgnoreCase(token, "shift")) {
+      mods |= ibus::Modifier::SHIFT_MASK;
+    } else if (EqualsIgnoreCase(token, "alt")) {
+      mods |= ibus::Modifier::ALT_MASK;
+    } else if (key == 0 && token.size() == 1 &&
+               std::isalnum(static_cast<unsigned char>(token[0]))) {
+      key = std::toupper(static_cast<unsigned char>(token[0]));
+    } else if (key == 0 && EqualsIgnoreCase(token, "space")) {
+      key = 0x20;
+    } else if (key == 0 && EqualsIgnoreCase(token, "tab")) {
+      key = 0x09;
+    } else if (key == 0 && EqualsIgnoreCase(token, "enter")) {
+      key = 0x0D;
+    } else {
+      return false;
+    }
+
+    if (end == std::string::npos)
+      break;
+    start = end + 1;
+  }
+
+  if (key == 0 || mods == 0)
+    return false;
+
+  *modifiers = mods;
+  *keycode = key;
+  return true;
+}
+
 bool WriteClipboardText(HWND owner, const std::wstring& text) {
   if (!OpenClipboard(owner))
     return false;
@@ -454,6 +521,8 @@ void RimeWithWeaselHandler::Initialize() {
     rime_api->join_maintenance_thread();
   }
 
+  _LoadClipboardSettings(nullptr);
+
   RimeConfig config = {NULL};
   if (rime_api->config_open("weasel", &config)) {
     if (m_ui) {
@@ -481,6 +550,7 @@ void RimeWithWeaselHandler::Initialize() {
                                   &m_show_notifications_time))
       m_show_notifications_time = 1200;
     _LoadAppOptions(&config, m_app_options);
+    _LoadClipboardSettings(&config);
     rime_api->config_close(&config);
   }
 
@@ -898,7 +968,7 @@ bool RimeWithWeaselHandler::_IsDeployerRunning() {
 }
 
 void RimeWithWeaselHandler::_SetupClipboardMonitor() {
-  if (m_clipboard_hwnd)
+  if (!m_clipboard_enabled || m_clipboard_hwnd)
     return;
 
   WNDCLASSEX wc = {};
@@ -947,6 +1017,47 @@ LRESULT CALLBACK RimeWithWeaselHandler::ClipboardWndProc(HWND hwnd,
   return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+void RimeWithWeaselHandler::_LoadClipboardSettings(RimeConfig* config) {
+  auto clamp_int = [](int value, int lo, int hi) {
+    return value < lo ? lo : (value > hi ? hi : value);
+  };
+
+  m_clipboard_enabled = true;
+  m_clipboard_history_limit = kClipboardHistoryLimit;
+  m_clipboard_page_size = kClipboardVisibleLimit;
+  m_clipboard_max_text_length = kClipboardMaxTextLength;
+  m_clipboard_hotkey_modifiers =
+      ibus::Modifier::CONTROL_MASK | ibus::Modifier::SHIFT_MASK;
+  m_clipboard_hotkey_keycode = 'V';
+
+  if (!config)
+    return;
+
+  Bool enabled = 0;
+  if (rime_api->config_get_bool(config, "clipboard/enabled", &enabled))
+    m_clipboard_enabled = enabled != 0;
+
+  int value = 0;
+  if (rime_api->config_get_int(config, "clipboard/history_limit", &value))
+    m_clipboard_history_limit = static_cast<size_t>(clamp_int(value, 1, 1000));
+  if (rime_api->config_get_int(config, "clipboard/page_size", &value))
+    m_clipboard_page_size = static_cast<size_t>(clamp_int(value, 1, 8));
+  if (rime_api->config_get_int(config, "clipboard/max_text_length", &value))
+    m_clipboard_max_text_length =
+        static_cast<size_t>(clamp_int(value, 1024, 4 * 1024 * 1024));
+
+  char hotkey[128] = {0};
+  if (rime_api->config_get_string(config, "clipboard/hotkey", hotkey,
+                                  static_cast<int>(sizeof(hotkey) - 1))) {
+    UINT modifiers = 0;
+    int keycode = 0;
+    if (ParseClipboardHotkey(hotkey, &modifiers, &keycode)) {
+      m_clipboard_hotkey_modifiers = modifiers;
+      m_clipboard_hotkey_keycode = keycode;
+    }
+  }
+}
+
 void RimeWithWeaselHandler::_LoadClipboardHistory() {
   std::lock_guard<std::mutex> lock(m_clipboard_mutex);
   m_clipboard_entries.clear();
@@ -957,7 +1068,7 @@ void RimeWithWeaselHandler::_LoadClipboardHistory() {
 
   uint32_t count = 0;
   if (fread(&count, sizeof(count), 1, file) == 1) {
-    count = (std::min)(count, static_cast<uint32_t>(kClipboardHistoryLimit));
+    count = (std::min)(count, static_cast<uint32_t>(m_clipboard_history_limit));
     for (uint32_t i = 0; i < count; ++i) {
       uint32_t length = 0;
       if (fread(&length, sizeof(length), 1, file) != 1 || length > (1u << 20)) {
@@ -1079,7 +1190,7 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
       return;
   } else {
     entry = ReadClipboardText(m_clipboard_hwnd);
-    if (entry.empty() || entry.size() > kClipboardMaxTextLength)
+    if (entry.empty() || entry.size() > m_clipboard_max_text_length)
       return;
   }
 
@@ -1091,8 +1202,8 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
       m_clipboard_entries.erase(it);
 
     m_clipboard_entries.insert(m_clipboard_entries.begin(), entry);
-    if (m_clipboard_entries.size() > kClipboardHistoryLimit)
-      m_clipboard_entries.resize(kClipboardHistoryLimit);
+    if (m_clipboard_entries.size() > m_clipboard_history_limit)
+      m_clipboard_entries.resize(m_clipboard_history_limit);
   }
 
   _SaveClipboardHistory();
@@ -1101,21 +1212,27 @@ void RimeWithWeaselHandler::_CaptureClipboardText() {
 
 bool RimeWithWeaselHandler::_IsClipboardHotkey(
     const weasel::KeyEvent& keyEvent) const {
-  if (keyEvent.mask & ibus::Modifier::RELEASE_MASK)
-    return false;
-
-  if (!(keyEvent.mask & ibus::Modifier::CONTROL_MASK) ||
-      !(keyEvent.mask & ibus::Modifier::SHIFT_MASK) ||
-      (keyEvent.mask & ibus::Modifier::ALT_MASK)) {
+  if (!m_clipboard_enabled || (keyEvent.mask & ibus::Modifier::RELEASE_MASK)) {
     return false;
   }
 
-  return keyEvent.keycode == 'V' || keyEvent.keycode == 'v' ||
-         keyEvent.keycode == 0x56 || keyEvent.keycode == 0x76;
+  const UINT relevant_modifiers = ibus::Modifier::CONTROL_MASK |
+                                  ibus::Modifier::SHIFT_MASK |
+                                  ibus::Modifier::ALT_MASK;
+  if ((keyEvent.mask & relevant_modifiers) != m_clipboard_hotkey_modifiers)
+    return false;
+
+  int keycode = keyEvent.keycode;
+  if (keycode >= 'a' && keycode <= 'z')
+    keycode = std::toupper(static_cast<unsigned char>(keycode));
+  int expected = m_clipboard_hotkey_keycode;
+  if (expected >= 'a' && expected <= 'z')
+    expected = std::toupper(static_cast<unsigned char>(expected));
+  return keycode == expected;
 }
 
 void RimeWithWeaselHandler::_ShowClipboardPanel(WeaselSessionId ipc_id) {
-  if (!m_ui)
+  if (!m_clipboard_enabled || !m_ui)
     return;
 
   m_clipboard_mode = true;
@@ -1191,7 +1308,7 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
       [](const Item& a, const Item& b) { return a.favorite && !b.favorite; });
 
   size_t total_pages =
-      (filtered.size() + kClipboardVisibleLimit - 1) / kClipboardVisibleLimit;
+      (filtered.size() + m_clipboard_page_size - 1) / m_clipboard_page_size;
   if (total_pages == 0)
     total_pages = 1;
 
@@ -1201,8 +1318,8 @@ void RimeWithWeaselHandler::_RefreshClipboardPanel(WeaselSessionId ipc_id) {
   if (m_clipboard_page >= m_clipboard_total_pages)
     m_clipboard_page = m_clipboard_total_pages - 1;
 
-  size_t begin = static_cast<size_t>(m_clipboard_page) * kClipboardVisibleLimit;
-  size_t end = (std::min)(begin + kClipboardVisibleLimit, filtered.size());
+  size_t begin = static_cast<size_t>(m_clipboard_page) * m_clipboard_page_size;
+  size_t end = (std::min)(begin + m_clipboard_page_size, filtered.size());
 
   m_clipboard_visible.clear();
   for (size_t i = begin; i < end; ++i)
@@ -1297,18 +1414,31 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
       return true;
 
     case ibus::Page_Up:
-      if (m_clipboard_page > 0) {
-        --m_clipboard_page;
+      if (m_clipboard_total_pages > 1) {
+        m_clipboard_page = (m_clipboard_page - 1 + m_clipboard_total_pages) %
+                           m_clipboard_total_pages;
         m_clipboard_highlight = 0;
       }
       _RefreshClipboardPanel(ipc_id);
       return true;
 
     case ibus::Page_Down:
-      if (m_clipboard_page + 1 < m_clipboard_total_pages) {
-        ++m_clipboard_page;
+      if (m_clipboard_total_pages > 1) {
+        m_clipboard_page = (m_clipboard_page + 1) % m_clipboard_total_pages;
         m_clipboard_highlight = 0;
       }
+      _RefreshClipboardPanel(ipc_id);
+      return true;
+
+    case ibus::Home:
+      m_clipboard_page = 0;
+      m_clipboard_highlight = 0;
+      _RefreshClipboardPanel(ipc_id);
+      return true;
+
+    case ibus::End:
+      m_clipboard_page = m_clipboard_total_pages - 1;
+      m_clipboard_highlight = 0;
       _RefreshClipboardPanel(ipc_id);
       return true;
 
@@ -1370,6 +1500,20 @@ bool RimeWithWeaselHandler::_HandleClipboardKey(
       (keyEvent.keycode == 'D' || keyEvent.keycode == 'd' ||
        keyEvent.keycode == 0x44 || keyEvent.keycode == 0x64)) {
     _ToggleClipboardFavorite();
+    return true;
+  }
+
+  if ((keyEvent.mask & ibus::Modifier::CONTROL_MASK) &&
+      !(keyEvent.mask & ibus::Modifier::ALT_MASK) &&
+      !(keyEvent.mask & ibus::Modifier::SHIFT_MASK) &&
+      (keyEvent.keycode == 'U' || keyEvent.keycode == 'u' ||
+       keyEvent.keycode == 0x55 || keyEvent.keycode == 0x75)) {
+    if (!m_clipboard_query.empty()) {
+      m_clipboard_query.clear();
+      m_clipboard_page = 0;
+      m_clipboard_highlight = 0;
+      _RefreshClipboardPanel(ipc_id);
+    }
     return true;
   }
 

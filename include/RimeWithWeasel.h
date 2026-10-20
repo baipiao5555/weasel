@@ -94,10 +94,11 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
 
   void _UpdateInlinePreeditStatus(WeaselSessionId ipc_id);
 
-  // Built-in clipboard history panel. The first version reuses the candidate
-  // window and handles text entries only.
+  // Built-in clipboard history panel. It reuses the candidate window and
+  // handles text and file-list entries.
   void _SetupClipboardMonitor();
   void _TeardownClipboardMonitor();
+  void _LoadClipboardSettings(RimeConfig* config);
   void _LoadClipboardHistory();
   void _SaveClipboardHistory();
   void _LoadClipboardFavorites();
@@ -155,6 +156,13 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   DWORD m_pid;
 
   bool m_clipboard_mode = false;
+  bool m_clipboard_enabled = true;
+  size_t m_clipboard_history_limit = 100;
+  size_t m_clipboard_page_size = 8;
+  size_t m_clipboard_max_text_length = 256 * 1024;
+  UINT m_clipboard_hotkey_modifiers =
+      ibus::Modifier::CONTROL_MASK | ibus::Modifier::SHIFT_MASK;
+  int m_clipboard_hotkey_keycode = 'V';
   std::atomic<bool> m_clipboard_dirty{false};
   std::wstring m_clipboard_query;
   std::vector<std::wstring> m_clipboard_entries;
